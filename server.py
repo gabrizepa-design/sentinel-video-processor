@@ -1,6 +1,6 @@
-import io, subprocess, tempfile, requests
+import io, math, json, subprocess, tempfile, requests
 from flask import Flask, request, send_file
-# sentinel-video v2
+# sentinel-video v3 — Fase 6: B-Roll con Pexels
 
 app = Flask(__name__)
 
@@ -12,9 +12,15 @@ BACKGROUNDS = {
     'default':     '0x0a0a0a',
 }
 
+
 @app.route('/health')
 def health():
     return {'status': 'ok'}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _get_audio_duration(audio_path):
     probe = subprocess.run(
@@ -24,17 +30,103 @@ def _get_audio_duration(audio_path):
     )
     return float(probe.stdout.strip())
 
+
+def _get_video_duration(video_path):
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+         '-of', 'csv=p=0', video_path],
+        capture_output=True, text=True
+    )
+    try:
+        return float(probe.stdout.strip())
+    except Exception:
+        return 0.0
+
+
 def _download(url, path):
-    r = requests.get(url, stream=True, timeout=120)
+    r = requests.get(url, stream=True, timeout=120,
+                     headers={'User-Agent': 'Mozilla/5.0 Sentinel/3.0'})
+    r.raise_for_status()
     with open(path, 'wb') as f:
         for chunk in r.iter_content(65536):
             f.write(chunk)
+
+
+def _normalize_clip(src, dst, width=1280, height=720, max_dur=30):
+    """Re-encoda clip a resolución objetivo, máx max_dur segundos, sin audio."""
+    vf = (f'scale={width}:{height}:force_original_aspect_ratio=increase,'
+          f'crop={width}:{height}')
+    subprocess.run([
+        'ffmpeg', '-y', '-i', src, '-t', str(max_dur),
+        '-vf', vf,
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-an', dst
+    ], check=True, capture_output=True)
+
+
+def _build_broll(tmp, stock_urls, body_dur, width=1280, height=720):
+    """
+    Descarga, normaliza y concatena clips de stock para cubrir body_dur segundos.
+    Retorna path al broll.mp4 final. Si no hay clips, retorna None (fallback sólido).
+    """
+    norm_clips = []
+    for i, url in enumerate(stock_urls[:4]):
+        raw  = f"{tmp}/raw_{i}.mp4"
+        norm = f"{tmp}/norm_{i}.mp4"
+        try:
+            _download(url, raw)
+            _normalize_clip(raw, norm, width=width, height=height)
+            norm_clips.append(norm)
+        except Exception as e:
+            print(f"[broll] clip {i} FAILED: {e}")
+
+    if not norm_clips:
+        return None  # llamador usará fondo sólido como fallback
+
+    broll_path = f"{tmp}/broll.mp4"
+
+    if len(norm_clips) == 1:
+        # Loop de un solo clip
+        subprocess.run([
+            'ffmpeg', '-y',
+            '-stream_loop', '-1', '-i', norm_clips[0],
+            '-t', str(body_dur),
+            '-c:v', 'libx264', '-preset', 'fast',
+            broll_path
+        ], check=True, capture_output=True)
+        return broll_path
+
+    # Múltiples clips: repetir hasta cubrir body_dur
+    single_dur = _get_video_duration(norm_clips[0]) or 20.0
+    needed = max(1, math.ceil(body_dur / (single_dur * len(norm_clips))))
+    tiled  = (norm_clips * needed)[:12]  # máx 12 segmentos
+
+    concat_txt = f"{tmp}/broll_concat.txt"
+    with open(concat_txt, 'w') as f:
+        for p in tiled:
+            f.write(f"file '{p}'\n")
+
+    subprocess.run([
+        'ffmpeg', '-y',
+        '-f', 'concat', '-safe', '0', '-i', concat_txt,
+        '-t', str(body_dur),
+        '-c:v', 'libx264', '-preset', 'fast',
+        broll_path
+    ], check=True, capture_output=True)
+    return broll_path
+
+
+# ---------------------------------------------------------------------------
+# Endpoint /process  (legacy — fondo de color sólido, 1280x720)
+# ---------------------------------------------------------------------------
 
 @app.route('/process', methods=['POST'])
 def process():
     intro_url  = request.form.get('intro_url')
     categoria  = request.form.get('categoria', 'default')
-    audio_file = request.files.get('audio') or request.files.get('audio_mp3') or (next(iter(request.files.values()), None))
+    audio_file = (request.files.get('audio')
+                  or request.files.get('audio_mp3')
+                  or next(iter(request.files.values()), None))
 
     if not intro_url or not audio_file:
         return {'error': 'Missing intro_url or audio'}, 400
@@ -72,11 +164,18 @@ def process():
     return send_file(io.BytesIO(data), mimetype='video/mp4',
                      as_attachment=True, download_name='sentinel.mp4')
 
+
+# ---------------------------------------------------------------------------
+# Endpoint /process_short  (legacy — fondo sólido, 720x1280 vertical)
+# ---------------------------------------------------------------------------
+
 @app.route('/process_short', methods=['POST'])
 def process_short():
     intro_url  = request.form.get('intro_url')
     categoria  = request.form.get('categoria', 'default')
-    audio_file = request.files.get('audio') or request.files.get('audio_mp3') or (next(iter(request.files.values()), None))
+    audio_file = (request.files.get('audio')
+                  or request.files.get('audio_mp3')
+                  or next(iter(request.files.values()), None))
 
     if not intro_url or not audio_file:
         return {'error': 'Missing intro_url or audio'}, 400
@@ -91,8 +190,7 @@ def process_short():
         audio_file.save(audio_path)
         _download(intro_url, intro_path)
 
-        raw_duration = _get_audio_duration(audio_path)
-        # Short: max 50s de audio (10s intro + 40s cuerpo = 50s total)
+        raw_duration   = _get_audio_duration(audio_path)
         audio_duration = min(raw_duration, 50.0)
         body_duration  = audio_duration - 10.0
 
@@ -102,13 +200,9 @@ def process_short():
             '-f', 'lavfi', '-i', f'color=c={color}:size=720x1280:rate=24',
             '-i', audio_path,
             '-filter_complex',
-            # Intro: crop center 9:16 del clip 16:9
             f'[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=720:1280[intro_v];'
-            # Cuerpo: fondo vertical
             f'[1:v]trim=0:{body_duration},setpts=PTS-STARTPTS[body];'
-            # Concat intro + cuerpo
             f'[intro_v][body]concat=n=2:v=1:a=0[v];'
-            # Audio recortado a audio_duration, desfasado 10s
             f'[2:a]atrim=0:{audio_duration},adelay=10000:all=1[a]',
             '-map', '[v]', '-map', '[a]',
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
@@ -123,6 +217,158 @@ def process_short():
 
     return send_file(io.BytesIO(data), mimetype='video/mp4',
                      as_attachment=True, download_name='sentinel_short.mp4')
+
+
+# ---------------------------------------------------------------------------
+# Endpoint /process_v2  (Fase 6 — B-Roll Pexels, 1280x720)
+# ---------------------------------------------------------------------------
+
+@app.route('/process_v2', methods=['POST'])
+def process_v2():
+    intro_url  = request.form.get('intro_url')
+    stock_urls = json.loads(request.form.get('stock_urls', '[]'))
+    audio_file = (request.files.get('audio')
+                  or request.files.get('audio_mp3')
+                  or next(iter(request.files.values()), None))
+
+    if not intro_url or not audio_file:
+        return {'error': 'Missing intro_url or audio'}, 400
+
+    with tempfile.TemporaryDirectory() as tmp:
+        intro_path  = f"{tmp}/intro.mp4"
+        audio_path  = f"{tmp}/audio.mp3"
+        output_path = f"{tmp}/output_v2.mp4"
+
+        audio_file.save(audio_path)
+        _download(intro_url, intro_path)
+        duration     = _get_audio_duration(audio_path)
+        body_dur     = max(duration - 10.0, 1.0)
+
+        # Intentar construir B-Roll
+        broll_path = _build_broll(tmp, stock_urls, body_dur, width=1280, height=720)
+
+        if broll_path:
+            # B-Roll disponible: intro + broll + audio con adelay 10s
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', intro_path,
+                '-i', broll_path,
+                '-i', audio_path,
+                '-filter_complex',
+                f'[0:v][1:v]concat=n=2:v=1:a=0[v];'
+                f'[2:a]adelay=10000:all=1[a]',
+                '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                output_path
+            ]
+        else:
+            # Fallback a fondo sólido (igual que /process)
+            color = BACKGROUNDS['default']
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', intro_path,
+                '-f', 'lavfi', '-i', f'color=c={color}:size=1280x720:rate=24',
+                '-i', audio_path,
+                '-filter_complex',
+                f'[1:v]trim=0:{duration},setpts=PTS-STARTPTS[body];'
+                f'[0:v][body]concat=n=2:v=1:a=0[v];'
+                f'[2:a]adelay=10000:all=1[a]',
+                '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                output_path
+            ]
+
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        with open(output_path, 'rb') as f:
+            data = f.read()
+
+    return send_file(io.BytesIO(data), mimetype='video/mp4',
+                     as_attachment=True, download_name='sentinel.mp4')
+
+
+# ---------------------------------------------------------------------------
+# Endpoint /process_short_v2  (Fase 6 — B-Roll Pexels, 720x1280 vertical)
+# ---------------------------------------------------------------------------
+
+@app.route('/process_short_v2', methods=['POST'])
+def process_short_v2():
+    intro_url  = request.form.get('intro_url')
+    stock_urls = json.loads(request.form.get('stock_urls', '[]'))
+    audio_file = (request.files.get('audio')
+                  or request.files.get('audio_mp3')
+                  or next(iter(request.files.values()), None))
+
+    if not intro_url or not audio_file:
+        return {'error': 'Missing intro_url or audio'}, 400
+
+    with tempfile.TemporaryDirectory() as tmp:
+        intro_path  = f"{tmp}/intro.mp4"
+        audio_path  = f"{tmp}/audio.mp3"
+        output_path = f"{tmp}/short_v2.mp4"
+
+        audio_file.save(audio_path)
+        _download(intro_url, intro_path)
+
+        raw_dur        = _get_audio_duration(audio_path)
+        audio_duration = min(raw_dur, 50.0)
+        body_dur       = max(audio_duration - 10.0, 1.0)
+
+        broll_path = _build_broll(tmp, stock_urls, body_dur, width=720, height=1280)
+
+        if broll_path:
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', intro_path,
+                '-i', broll_path,
+                '-i', audio_path,
+                '-filter_complex',
+                # Intro: crop center 9:16
+                f'[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=720:1280[intro_v];'
+                # Concat intro + broll
+                f'[intro_v][1:v]concat=n=2:v=1:a=0[v];'
+                # Audio recortado y desfasado
+                f'[2:a]atrim=0:{audio_duration},adelay=10000:all=1[a]',
+                '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-t', '60',
+                output_path
+            ]
+        else:
+            # Fallback a fondo sólido vertical
+            color = BACKGROUNDS['default']
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', intro_path,
+                '-f', 'lavfi', '-i', f'color=c={color}:size=720x1280:rate=24',
+                '-i', audio_path,
+                '-filter_complex',
+                f'[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=720:1280[intro_v];'
+                f'[1:v]trim=0:{body_dur},setpts=PTS-STARTPTS[body];'
+                f'[intro_v][body]concat=n=2:v=1:a=0[v];'
+                f'[2:a]atrim=0:{audio_duration},adelay=10000:all=1[a]',
+                '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-t', '60',
+                output_path
+            ]
+
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        with open(output_path, 'rb') as f:
+            data = f.read()
+
+    return send_file(io.BytesIO(data), mimetype='video/mp4',
+                     as_attachment=True, download_name='sentinel_short.mp4')
+
+
+# ---------------------------------------------------------------------------
+# Endpoint /image/<categoria>  (legacy — sin cambios)
+# ---------------------------------------------------------------------------
 
 @app.route('/image/<categoria>')
 def get_image(categoria):
@@ -144,6 +390,7 @@ def get_image(categoria):
         with open(img_path, 'rb') as f:
             data = f.read()
     return send_file(io.BytesIO(data), mimetype='image/jpeg')
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000, debug=True)
