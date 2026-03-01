@@ -72,7 +72,7 @@ def process():
                      as_attachment=True, download_name='sentinel.mp4')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000)
+    app.run(host='0.0.0.0', port=3000, debug=True)
 Parte 2: Despliegue en EasyPanel
 Crear repo en GitHub con los 3 archivos anteriores. Push a main.
 
