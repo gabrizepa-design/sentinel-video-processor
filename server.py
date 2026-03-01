@@ -71,6 +71,28 @@ def process():
     return send_file(io.BytesIO(data), mimetype='video/mp4',
                      as_attachment=True, download_name='sentinel.mp4')
 
-if __name__ == '__main__':
+@app.route('/image/<categoria>')
+def get_image(categoria):
+    colors = {
+        'militar':    '0x0a0f1a',
+        'tecnologia': '0x0a1a0f',
+        'conflicto':  '0x1a0a0a',
+        'geopolitica':'0x0a0a1a',
+        'default':    '0x0a0a0f',
+    }
+    color = colors.get(categoria, colors['default'])
+    with tempfile.TemporaryDirectory() as tmp:
+        img_path = f"{tmp}/bg.jpg"
+        subprocess.run([
+            'ffmpeg', '-y', '-f', 'lavfi',
+            '-i', f'color=c={color}:size=1280x720',
+            '-frames:v', '1', '-q:v', '2', img_path
+        ], check=True, capture_output=True)
+        with open(img_path, 'rb') as f:
+            data = f.read()
+    return send_file(io.BytesIO(data), mimetype='image/jpeg')
+
+if __name__ == '__main__':   # ← esta línea va AL FINAL
     app.run(host='0.0.0.0', port=3000, debug=True)
+
 
