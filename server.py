@@ -19,7 +19,7 @@ def health():
 def process():
     intro_url = request.form.get('intro_url')
     categoria  = request.form.get('categoria', 'default')
-    audio_file = request.files.get('audio')
+    audio_file = request.files.get('audio') or request.files.get('audio_mp3') or (next(iter(request.files.values()), None))
 
     if not intro_url or not audio_file:
         return {'error': 'Missing intro_url or audio'}, 400
