@@ -73,23 +73,4 @@ def process():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000, debug=True)
-Parte 2: Despliegue en EasyPanel
-Crear repo en GitHub con los 3 archivos anteriores. Push a main.
 
-EasyPanel → tu proyecto → + Create Service → App
-
-En la configuración:
-
-Source: GitHub → seleccionar tu repo
-Branch: main
-Build method: Dockerfile (aquí sí funciona porque es un contenedor nuevo, no el de n8n)
-Ports → Add Port:
-
-Published: 3000
-Target: 3000
-Deploy. Espera el build (~2-3 min). Verifica en los logs que aparezca Running on http://0.0.0.0:3000.
-
-Anota el dominio que EasyPanel asigna al servicio, algo como:
-https://ffmpeg-sentinel.gpsefe.easypanel.host
-
-Prueba: curl https://ffmpeg-sentinel.gpsefe.easypanel.host/health → {"status":"ok"}
