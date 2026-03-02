@@ -1,7 +1,7 @@
 import io, math, json, subprocess, tempfile, requests
 from flask import Flask, request, send_file
 from PIL import Image, ImageDraw, ImageFont
-# sentinel-video v4 — Fase 7: Thumbnails automáticos
+# sentinel-video v5 — Fase 8A: Short sin Runway
 
 app = Flask(__name__)
 
