@@ -1,6 +1,7 @@
 import io, math, json, subprocess, tempfile, requests
 from flask import Flask, request, send_file
-# sentinel-video v3 — Fase 6: B-Roll con Pexels
+from PIL import Image, ImageDraw, ImageFont
+# sentinel-video v4 — Fase 7: Thumbnails automáticos
 
 app = Flask(__name__)
 
@@ -390,6 +391,123 @@ def get_image(categoria):
         with open(img_path, 'rb') as f:
             data = f.read()
     return send_file(io.BytesIO(data), mimetype='image/jpeg')
+
+
+# ---------------------------------------------------------------------------
+# Endpoint /generate_thumbnail  (Fase 7 — 1280x720 JPEG)
+# ---------------------------------------------------------------------------
+
+ACCENT_COLORS = {
+    'militar':     (30,  60, 120),   # azul acero
+    'tecnologia':  (0,  180, 120),   # verde tech
+    'conflicto':   (180, 30,  30),   # rojo urgente
+    'geopolitica': (180, 120,  0),   # ámbar
+    'default':     (220,  50,  50),  # rojo Sentinel
+}
+
+FONT_PATHS = [
+    '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/ttf-dejavu/DejaVuSans-Bold.ttf',
+]
+
+def _load_font(size):
+    for path in FONT_PATHS:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+def _wrap_text(text, font, max_width, draw):
+    words = text.split()
+    lines, current = [], ''
+    for word in words:
+        test = (current + ' ' + word).strip()
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines[:3]  # máximo 3 líneas
+
+@app.route('/generate_thumbnail', methods=['POST'])
+def generate_thumbnail():
+    image_url = request.form.get('image_url', '')
+    titulo    = request.form.get('titulo', 'SENTINEL NEWS')
+    categoria = request.form.get('categoria', 'default')
+
+    W, H = 1280, 720
+    accent = ACCENT_COLORS.get(categoria, ACCENT_COLORS['default'])
+
+    # --- Fondo ---
+    try:
+        r = requests.get(image_url, timeout=15,
+                         headers={'User-Agent': 'Mozilla/5.0 Sentinel/4.0'})
+        r.raise_for_status()
+        bg = Image.open(io.BytesIO(r.content)).convert('RGB')
+        # Crop center 16:9
+        bw, bh = bg.size
+        if bw / bh > W / H:
+            nw = int(bh * W / H)
+            bg = bg.crop(((bw - nw) // 2, 0, (bw - nw) // 2 + nw, bh))
+        else:
+            nh = int(bw * H / W)
+            bg = bg.crop((0, (bh - nh) // 2, bw, (bh - nh) // 2 + nh))
+        bg = bg.resize((W, H), Image.LANCZOS)
+    except Exception:
+        bg = Image.new('RGB', (W, H), (15, 15, 25))
+
+    draw = ImageDraw.Draw(bg, 'RGBA')
+
+    # --- Overlay oscuro en parte inferior (45% del alto) ---
+    overlay_h = int(H * 0.45)
+    draw.rectangle([(0, H - overlay_h), (W, H)], fill=(0, 0, 0, 190))
+
+    # --- Barra de acento superior (8px) ---
+    draw.rectangle([(0, 0), (W, 8)], fill=accent)
+
+    # --- Badge de categoría (top-left) ---
+    badge_font = _load_font(22)
+    badge_text = categoria.upper()
+    bx, by = 20, 20
+    bpad = 8
+    bb = draw.textbbox((bx + bpad, by + bpad), badge_text, font=badge_font)
+    draw.rectangle(
+        [(bx, by), (bb[2] + bpad, bb[3] + bpad)],
+        fill=accent
+    )
+    draw.text((bx + bpad, by + bpad), badge_text, font=badge_font, fill='white')
+
+    # --- Texto del título ---
+    title_font  = _load_font(54)
+    margin      = 40
+    text_y_base = H - overlay_h + 30
+    lines = _wrap_text(titulo, title_font, W - margin * 2, draw)
+    line_h = 64
+    for i, line in enumerate(lines):
+        y = text_y_base + i * line_h
+        # Sombra
+        draw.text((margin + 2, y + 2), line, font=title_font, fill=(0, 0, 0, 200))
+        draw.text((margin, y),         line, font=title_font, fill='white')
+
+    # --- Branding "SENTINEL" bottom-right ---
+    brand_font = _load_font(26)
+    brand_text = '▶ SENTINEL'
+    bb2 = draw.textbbox((0, 0), brand_text, font=brand_font)
+    bw2 = bb2[2] - bb2[0]
+    draw.text((W - bw2 - 20, H - 38), brand_text,
+              font=brand_font, fill=(220, 220, 220, 210))
+
+    # --- Serializar y devolver ---
+    out = io.BytesIO()
+    bg.convert('RGB').save(out, format='JPEG', quality=92)
+    out.seek(0)
+    return send_file(out, mimetype='image/jpeg', download_name='thumbnail.jpg')
 
 
 if __name__ == '__main__':
