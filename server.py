@@ -1,7 +1,7 @@
 import io, math, json, subprocess, tempfile, requests
 from flask import Flask, request, send_file
 from PIL import Image, ImageDraw, ImageFont
-# sentinel-video v5 — Fase 8A: Short sin Runway
+# sentinel-video v4 — Fase 7: Thumbnails automáticos
 
 app = Flask(__name__)
 
@@ -65,13 +65,14 @@ def _normalize_clip(src, dst, width=1280, height=720, max_dur=30):
     ], check=True, capture_output=True)
 
 
-def _build_broll(tmp, stock_urls, body_dur, width=1280, height=720):
+def _build_broll(tmp, stock_urls, body_dur, width=1280, height=720, max_clips=4):
     """
     Descarga, normaliza y concatena clips de stock para cubrir body_dur segundos.
     Retorna path al broll.mp4 final. Si no hay clips, retorna None (fallback sólido).
+    max_clips=4 para videos cortos, usar 12+ para Daily Digest.
     """
     norm_clips = []
-    for i, url in enumerate(stock_urls[:4]):
+    for i, url in enumerate(stock_urls[:max_clips]):
         raw  = f"{tmp}/raw_{i}.mp4"
         norm = f"{tmp}/norm_{i}.mp4"
         try:
@@ -99,8 +100,10 @@ def _build_broll(tmp, stock_urls, body_dur, width=1280, height=720):
 
     # Múltiples clips: repetir hasta cubrir body_dur
     single_dur = _get_video_duration(norm_clips[0]) or 20.0
-    needed = max(1, math.ceil(body_dur / (single_dur * len(norm_clips))))
-    tiled  = (norm_clips * needed)[:12]  # máx 12 segmentos
+    total_clip_dur = single_dur * len(norm_clips)
+    needed = max(1, math.ceil(body_dur / total_clip_dur))
+    # Sin cap fijo: generar suficientes segmentos para cubrir body_dur
+    tiled = (norm_clips * needed)
 
     concat_txt = f"{tmp}/broll_concat.txt"
     with open(concat_txt, 'w') as f:
@@ -398,10 +401,12 @@ def get_image(categoria):
 # ---------------------------------------------------------------------------
 
 ACCENT_COLORS = {
-    'militar':     (30,  60, 120),   # azul acero
-    'tecnologia':  (0,  180, 120),   # verde tech
-    'conflicto':   (180, 30,  30),   # rojo urgente
-    'geopolitica': (180, 120,  0),   # ámbar
+    'militar':     ( 30,  60, 120),  # azul acero
+    'tecnologia':  ( 41, 128, 185),  # azul tech #2980B9
+    'conflicto':   (192,  57,  43),  # rojo #C0392B
+    'geopolitica': (180, 120,   0),  # ámbar
+    'diplomacia':  ( 39, 174,  96),  # verde #27AE60
+    'otro':        (127, 140, 141),  # gris #7F8C8D
     'default':     (220,  50,  50),  # rojo Sentinel
 }
 
@@ -571,6 +576,66 @@ def process_short_v3():
 
     return send_file(io.BytesIO(data), mimetype='video/mp4',
                      as_attachment=True, download_name='sentinel_short_v3.mp4')
+
+
+# ---------------------------------------------------------------------------
+# Endpoint /process_digest  (Fase 8B — Daily Digest, B-Roll puro, sin límite, 1280x720)
+# ---------------------------------------------------------------------------
+
+@app.route('/process_digest', methods=['POST'])
+def process_digest():
+    """Daily Digest: B-Roll Pexels puro sin intro Runway, sin límite de duración. 1280x720."""
+    stock_urls = json.loads(request.form.get('stock_urls', '[]'))
+    audio_file = (request.files.get('audio')
+                  or request.files.get('audio_mp3')
+                  or next(iter(request.files.values()), None))
+
+    if not audio_file:
+        return {'error': 'Missing audio'}, 400
+
+    with tempfile.TemporaryDirectory() as tmp:
+        audio_path  = f"{tmp}/audio.mp3"
+        output_path = f"{tmp}/digest.mp4"
+
+        audio_file.save(audio_path)
+        audio_dur  = _get_audio_duration(audio_path)
+
+        # Hasta 12 clips para mayor variedad en video largo
+        broll_path = _build_broll(tmp, stock_urls, audio_dur, width=1280, height=720, max_clips=12)
+
+        if broll_path:
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', broll_path,
+                '-i', audio_path,
+                '-filter_complex', f'[1:a]atrim=0:{audio_dur}[a]',
+                '-map', '0:v', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                output_path
+            ]
+        else:
+            # Fallback: fondo negro liso
+            cmd = [
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-i', f'color=c=0x0a0a0a:size=1280x720:rate=24',
+                '-i', audio_path,
+                '-filter_complex',
+                f'[0:v]trim=0:{audio_dur},setpts=PTS-STARTPTS[v];'
+                f'[1:a]atrim=0:{audio_dur}[a]',
+                '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                output_path
+            ]
+
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        with open(output_path, 'rb') as f:
+            data = f.read()
+
+    return send_file(io.BytesIO(data), mimetype='video/mp4',
+                     as_attachment=True, download_name='sentinel_digest.mp4')
 
 
 if __name__ == '__main__':
