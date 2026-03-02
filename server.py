@@ -510,5 +510,68 @@ def generate_thumbnail():
     return send_file(out, mimetype='image/jpeg', download_name='thumbnail.jpg')
 
 
+# ---------------------------------------------------------------------------
+# Endpoint /process_short_v3  (Fase 8A — Short sin Runway, B-Roll puro, 720x1280)
+# ---------------------------------------------------------------------------
+
+@app.route('/process_short_v3', methods=['POST'])
+def process_short_v3():
+    """Short vertical sin intro de Runway. Solo B-Roll Pexels + audio ElevenLabs."""
+    stock_urls = json.loads(request.form.get('stock_urls', '[]'))
+    audio_file = (request.files.get('audio')
+                  or request.files.get('audio_mp3')
+                  or next(iter(request.files.values()), None))
+
+    if not audio_file:
+        return {'error': 'Missing audio'}, 400
+
+    with tempfile.TemporaryDirectory() as tmp:
+        audio_path  = f"{tmp}/audio.mp3"
+        output_path = f"{tmp}/short_v3.mp4"
+
+        audio_file.save(audio_path)
+        raw_dur       = _get_audio_duration(audio_path)
+        audio_dur     = min(raw_dur, 55.0)
+
+        broll_path = _build_broll(tmp, stock_urls, audio_dur, width=720, height=1280)
+
+        if broll_path:
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', broll_path,
+                '-i', audio_path,
+                '-filter_complex',
+                f'[1:a]atrim=0:{audio_dur}[a]',
+                '-map', '0:v', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-t', '60',
+                output_path
+            ]
+        else:
+            # Fallback: fondo negro liso
+            cmd = [
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-i', f'color=c=0x0a0a0a:size=720x1280:rate=24',
+                '-i', audio_path,
+                '-filter_complex',
+                f'[0:v]trim=0:{audio_dur},setpts=PTS-STARTPTS[v];'
+                f'[1:a]atrim=0:{audio_dur}[a]',
+                '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-t', '60',
+                output_path
+            ]
+
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        with open(output_path, 'rb') as f:
+            data = f.read()
+
+    return send_file(io.BytesIO(data), mimetype='video/mp4',
+                     as_attachment=True, download_name='sentinel_short_v3.mp4')
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000, debug=True)
