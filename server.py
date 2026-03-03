@@ -1,4 +1,4 @@
-import io, math, json, subprocess, tempfile, requests
+import io, math, json, os, subprocess, tempfile, requests
 from flask import Flask, request, send_file
 from PIL import Image, ImageDraw, ImageFont
 # sentinel-video v4 — Fase 7: Thumbnails automáticos
@@ -411,10 +411,29 @@ ACCENT_COLORS = {
 }
 
 FONT_PATHS = [
+    '/tmp/DejaVuSans-Bold.ttf',                                        # descargada en runtime
     '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
     '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
     '/usr/share/fonts/ttf-dejavu/DejaVuSans-Bold.ttf',
 ]
+
+_FONT_URL = 'https://github.com/dejavu-fonts/dejavu-fonts/raw/main/ttf/DejaVuSans-Bold.ttf'
+
+def _ensure_font():
+    """Descarga DejaVuSans-Bold a /tmp si no existe en ninguna ruta del sistema."""
+    cached = '/tmp/DejaVuSans-Bold.ttf'
+    if os.path.exists(cached):
+        return
+    for path in FONT_PATHS[1:]:
+        if os.path.exists(path):
+            return
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(_FONT_URL, cached)
+    except Exception:
+        pass
+
+_ensure_font()  # ejecutar una vez al arrancar el módulo
 
 def _load_font(size):
     for path in FONT_PATHS:
@@ -422,7 +441,11 @@ def _load_font(size):
             return ImageFont.truetype(path, size)
         except Exception:
             continue
-    return ImageFont.load_default()
+    # Pillow >= 10.0.0 soporta size en load_default
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 def _wrap_text(text, font, max_width, draw):
     words = text.split()
