@@ -442,9 +442,15 @@ def _wrap_text(text, font, max_width, draw):
 
 @app.route('/generate_thumbnail', methods=['POST'])
 def generate_thumbnail():
-    image_url = request.form.get('image_url', '')
-    titulo    = request.form.get('titulo', 'SENTINEL NEWS')
-    categoria = request.form.get('categoria', 'default')
+    image_url       = request.form.get('image_url', '')
+    titulo          = request.form.get('titulo', 'SENTINEL NEWS')
+    texto_miniatura = request.form.get('texto_miniatura', '').strip()
+    categoria       = request.form.get('categoria', 'default')
+
+    # Fallback: si no viene texto_miniatura, usar las primeras 4 palabras del título
+    if not texto_miniatura:
+        clean_words = [w for w in titulo.split() if not w.startswith('#') and len(w) > 1]
+        texto_miniatura = ' '.join(clean_words[:4]).upper()
 
     W, H = 1280, 720
     accent = ACCENT_COLORS.get(categoria, ACCENT_COLORS['default'])
@@ -455,7 +461,6 @@ def generate_thumbnail():
                          headers={'User-Agent': 'Mozilla/5.0 Sentinel/4.0'})
         r.raise_for_status()
         bg = Image.open(io.BytesIO(r.content)).convert('RGB')
-        # Crop center 16:9
         bw, bh = bg.size
         if bw / bh > W / H:
             nw = int(bh * W / H)
@@ -469,12 +474,14 @@ def generate_thumbnail():
 
     draw = ImageDraw.Draw(bg, 'RGBA')
 
-    # --- Overlay oscuro en parte inferior (45% del alto) ---
-    overlay_h = int(H * 0.45)
-    draw.rectangle([(0, H - overlay_h), (W, H)], fill=(0, 0, 0, 190))
+    # --- Overlay oscuro sobre toda la imagen (legibilidad) ---
+    draw.rectangle([(0, 0), (W, H)], fill=(0, 0, 0, 120))
 
-    # --- Barra de acento superior (8px) ---
-    draw.rectangle([(0, 0), (W, 8)], fill=accent)
+    # --- Gradiente extra en zona inferior (badge + branding) ---
+    draw.rectangle([(0, H - 120), (W, H)], fill=(0, 0, 0, 160))
+
+    # --- Barra de acento superior (6px) ---
+    draw.rectangle([(0, 0), (W, 6)], fill=accent)
 
     # --- Badge de categoría (top-left) ---
     badge_font = _load_font(22)
@@ -482,25 +489,34 @@ def generate_thumbnail():
     bx, by = 20, 20
     bpad = 8
     bb = draw.textbbox((bx + bpad, by + bpad), badge_text, font=badge_font)
-    draw.rectangle(
-        [(bx, by), (bb[2] + bpad, bb[3] + bpad)],
-        fill=accent
-    )
+    draw.rectangle([(bx, by), (bb[2] + bpad, bb[3] + bpad)], fill=accent)
     draw.text((bx + bpad, by + bpad), badge_text, font=badge_font, fill='white')
 
-    # --- Texto del título ---
-    title_font  = _load_font(54)
-    margin      = 40
-    text_y_base = H - overlay_h + 30
-    lines = _wrap_text(titulo, title_font, W - margin * 2, draw)
-    line_h = 64
-    for i, line in enumerate(lines):
-        y = text_y_base + i * line_h
-        # Sombra
-        draw.text((margin + 2, y + 2), line, font=title_font, fill=(0, 0, 0, 200))
-        draw.text((margin, y),         line, font=title_font, fill='white')
+    # --- TEXTO_MINIATURA centrado, 96px, con stroke negro 3px ---
+    main_font = _load_font(96)
+    margin = 60
+    lines = _wrap_text(texto_miniatura, main_font, W - margin * 2, draw)
+    lines = lines[:2]  # máximo 2 líneas
+    line_h = 110
+    total_text_h = len(lines) * line_h
+    y_start = (H - total_text_h) // 2 - 10  # ligeramente arriba del centro
 
-    # --- Branding "SENTINEL" bottom-right ---
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=main_font)
+        text_w = bbox[2] - bbox[0]
+        x = (W - text_w) // 2
+        y = y_start + i * line_h
+        # Stroke negro 3px (8 direcciones) para máxima legibilidad sobre cualquier fondo
+        stroke = 3
+        for dx in range(-stroke, stroke + 1):
+            for dy in range(-stroke, stroke + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                draw.text((x + dx, y + dy), line, font=main_font, fill=(0, 0, 0, 255))
+        # Texto principal blanco
+        draw.text((x, y), line, font=main_font, fill='white')
+
+    # --- Branding "▶ SENTINEL" bottom-right ---
     brand_font = _load_font(26)
     brand_text = '▶ SENTINEL'
     bb2 = draw.textbbox((0, 0), brand_text, font=brand_font)
