@@ -638,13 +638,14 @@ def process_short_v3():
 
 @app.route('/process_short_v4', methods=['POST'])
 def process_short_v4():
-    """Short vertical 720x1280. Usa og:image de la noticia como fondo principal.
-    Si falla, cae a B-Roll Pexels. Si también falla, fondo negro."""
-    image_url  = request.form.get('image_url', '').strip()
-    stock_urls = json.loads(request.form.get('stock_urls', '[]'))
-    audio_file = (request.files.get('audio')
-                  or request.files.get('audio_mp3')
-                  or next(iter(request.files.values()), None))
+    """Short vertical 720x1280.
+    Prioridad: 0) og:video MP4 directo → 1) og:image blurred → 2) Pexels B-Roll → 3) negro."""
+    og_video_url = request.form.get('og_video_url', '').strip()
+    image_url    = request.form.get('image_url', '').strip()
+    stock_urls   = json.loads(request.form.get('stock_urls', '[]'))
+    audio_file   = (request.files.get('audio')
+                    or request.files.get('audio_mp3')
+                    or next(iter(request.files.values()), None))
 
     if not audio_file:
         return {'error': 'Missing audio'}, 400
@@ -659,8 +660,40 @@ def process_short_v4():
 
         video_input = None
 
+        # 0. Intentar og:video (MP4 directo de la noticia) — máxima relevancia
+        if og_video_url:
+            try:
+                vid_raw  = f"{tmp}/og_video_raw.mp4"
+                vid_norm = f"{tmp}/og_video_norm.mp4"
+                resp = requests.get(og_video_url, timeout=15,
+                                    headers={'User-Agent': 'Mozilla/5.0 Sentinel/4.0'})
+                resp.raise_for_status()
+                if len(resp.content) > 50000:  # mínimo 50 KB — descarta errores HTML
+                    with open(vid_raw, 'wb') as fh:
+                        fh.write(resp.content)
+                    _normalize_clip(vid_raw, vid_norm, width=720, height=1280, max_dur=60)
+                    norm_dur = _get_video_duration(vid_norm)
+                    if norm_dur > 1.0:
+                        if norm_dur >= audio_dur:
+                            video_input = vid_norm
+                        else:
+                            # Loopear para cubrir toda la duración del audio
+                            vid_loop = f"{tmp}/og_video_loop.mp4"
+                            subprocess.run([
+                                'ffmpeg', '-y',
+                                '-stream_loop', '-1', '-i', vid_norm,
+                                '-t', str(audio_dur),
+                                '-c:v', 'libx264', '-preset', 'fast',
+                                '-r', '24', '-pix_fmt', 'yuv420p',
+                                vid_loop
+                            ], check=True, capture_output=True)
+                            video_input = vid_loop
+                        app.logger.info(f'og:video OK — {og_video_url[:60]}')
+            except Exception as e:
+                app.logger.warning(f'og:video falló ({e}), intentando og:image')
+
         # 1. Intentar og:image como fondo principal
-        if image_url:
+        if not video_input and image_url:
             try:
                 img_path      = f"{tmp}/og_image.jpg"
                 img_clip_path = f"{tmp}/image_clip.mp4"
