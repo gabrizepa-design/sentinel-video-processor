@@ -1,7 +1,7 @@
-import io, math, json, os, subprocess, tempfile, requests
+import io, math, json, os, random, re, subprocess, tempfile, requests
 from flask import Flask, request, send_file
 from PIL import Image, ImageDraw, ImageFont
-# sentinel-video v4 — Fase 7: Thumbnails automáticos
+# sentinel-video v5 — Fase 11: Real news videos + B-Roll
 
 app = Flask(__name__)
 
@@ -53,6 +53,70 @@ def _download(url, path):
             f.write(chunk)
 
 
+def _extract_og_video(article_url):
+    """Intenta extraer og:video o video embebido de una URL de noticia.
+    Retorna URL del video MP4 o None."""
+    try:
+        r = requests.get(article_url, timeout=10,
+                         headers={'User-Agent': 'Mozilla/5.0 Sentinel/5.0'},
+                         allow_redirects=True)
+        r.raise_for_status()
+        html = r.text[:50000]  # solo primeros 50KB
+
+        # 1. og:video con MP4
+        m = re.search(r'<meta[^>]+property=["\']og:video(?::url)?["\'][^>]+content=["\'](https?://[^"\']+\.mp4[^"\']*)["\']', html, re.I)
+        if not m:
+            m = re.search(r'<meta[^>]+content=["\'](https?://[^"\']+\.mp4[^"\']*)["\'][^>]+property=["\']og:video', html, re.I)
+        if m:
+            return m.group(1)
+
+        # 2. og:video generico (puede ser iframe/embed — solo si es MP4)
+        m = re.search(r'<meta[^>]+property=["\']og:video["\'][^>]+content=["\'](https?://[^"\']+)["\']', html, re.I)
+        if m and '.mp4' in m.group(1).lower():
+            return m.group(1)
+
+        # 3. <video><source src="...mp4">
+        m = re.search(r'<source[^>]+src=["\'](https?://[^"\']+\.mp4[^"\']*)["\']', html, re.I)
+        if m:
+            return m.group(1)
+
+        # 4. <video src="...mp4">
+        m = re.search(r'<video[^>]+src=["\'](https?://[^"\']+\.mp4[^"\']*)["\']', html, re.I)
+        if m:
+            return m.group(1)
+
+    except Exception as e:
+        print(f'[og:video] {article_url[:60]}: {e}')
+    return None
+
+
+def _extract_real_videos(article_urls, tmp, width=1280, height=720, max_per_article=60):
+    """Para cada URL de articulo, intenta extraer y normalizar el video real.
+    Retorna lista de paths a clips normalizados (puede estar vacia)."""
+    clips = []
+    for i, url in enumerate(article_urls):
+        if not url or not url.startswith('http'):
+            continue
+        video_url = _extract_og_video(url)
+        if not video_url:
+            continue
+        raw  = f"{tmp}/real_raw_{i}.mp4"
+        norm = f"{tmp}/real_norm_{i}.mp4"
+        try:
+            _download(video_url, raw)
+            fsize = os.path.getsize(raw)
+            if fsize < 50000:  # <50KB = probablemente error HTML
+                continue
+            _normalize_clip(raw, norm, width=width, height=height, max_dur=max_per_article)
+            dur = _get_video_duration(norm)
+            if dur > 1.0:
+                clips.append(norm)
+                print(f'[real] clip {i} OK: {video_url[:60]} ({dur:.0f}s)')
+        except Exception as e:
+            print(f'[real] clip {i} FAILED: {e}')
+    return clips
+
+
 def _normalize_clip(src, dst, width=1280, height=720, max_dur=30):
     """Re-encoda clip a resolución objetivo, máx max_dur segundos, sin audio."""
     vf = (f'scale={width}:{height}:force_original_aspect_ratio=increase,'
@@ -99,12 +163,16 @@ def _build_broll(tmp, stock_urls, body_dur, width=1280, height=720, max_clips=4)
         ], check=True, capture_output=True)
         return broll_path
 
-    # Múltiples clips: repetir hasta cubrir body_dur
+    # Múltiples clips: repetir en orden aleatorio hasta cubrir body_dur
     single_dur = _get_video_duration(norm_clips[0]) or 20.0
     total_clip_dur = single_dur * len(norm_clips)
     needed = max(1, math.ceil(body_dur / total_clip_dur))
-    # Sin cap fijo: generar suficientes segmentos para cubrir body_dur
-    tiled = (norm_clips * needed)
+    # Shuffle cada ronda para que la repetición no sea obvia
+    tiled = []
+    for _ in range(needed):
+        batch = list(norm_clips)
+        random.shuffle(batch)
+        tiled.extend(batch)
 
     concat_txt = f"{tmp}/broll_concat.txt"
     with open(concat_txt, 'w') as f:
@@ -744,29 +812,60 @@ def process_short_v4():
 
 @app.route('/process_digest', methods=['POST'])
 def process_digest():
-    """Daily Digest: B-Roll Pexels puro sin intro Runway, sin límite de duración. 1280x720."""
-    stock_urls = json.loads(request.form.get('stock_urls', '[]'))
-    audio_file = (request.files.get('audio')
-                  or request.files.get('audio_mp3')
-                  or next(iter(request.files.values()), None))
+    """Daily Digest v2: real news videos + Pexels fallback, max 14 min. 1280x720."""
+    stock_urls   = json.loads(request.form.get('stock_urls', '[]'))
+    article_urls = json.loads(request.form.get('article_urls', '[]'))
+    audio_file   = (request.files.get('audio')
+                    or request.files.get('audio_mp3')
+                    or next(iter(request.files.values()), None))
 
     if not audio_file:
         return {'error': 'Missing audio'}, 400
+
+    MAX_DURATION = 840.0  # 14 minutos — safe para YouTube sin verificar
 
     with tempfile.TemporaryDirectory() as tmp:
         audio_path  = f"{tmp}/audio.mp3"
         output_path = f"{tmp}/digest.mp4"
 
         audio_file.save(audio_path)
-        audio_dur  = _get_audio_duration(audio_path)
+        audio_dur = min(_get_audio_duration(audio_path), MAX_DURATION)
 
-        # Hasta 12 clips para mayor variedad en video largo
-        broll_path = _build_broll(tmp, stock_urls, audio_dur, width=1280, height=720, max_clips=12)
+        # 1. Intentar videos reales de las noticias (max 60s cada uno)
+        real_clips = _extract_real_videos(article_urls, tmp, width=1280, height=720, max_per_article=60)
+        real_dur = sum(_get_video_duration(c) for c in real_clips)
+        print(f'[digest] {len(real_clips)} real clips, {real_dur:.0f}s total')
 
-        if broll_path:
+        # 2. Calcular cuanto falta cubrir con Pexels
+        remaining = audio_dur - real_dur
+        pexels_clips = []
+        if remaining > 5.0 and stock_urls:
+            broll_path = _build_broll(tmp, stock_urls, remaining, width=1280, height=720, max_clips=12)
+            if broll_path:
+                pexels_clips = [broll_path]
+
+        # 3. Combinar: real clips primero + Pexels para el resto
+        all_clips = real_clips + pexels_clips
+        if not all_clips:
+            # Ultimo recurso: fondo negro
             cmd = [
                 'ffmpeg', '-y',
-                '-i', broll_path,
+                '-f', 'lavfi', '-i', 'color=c=0x0a0a0a:size=1280x720:rate=24',
+                '-i', audio_path,
+                '-filter_complex',
+                f'[0:v]trim=0:{audio_dur},setpts=PTS-STARTPTS[v];'
+                f'[1:a]atrim=0:{audio_dur}[a]',
+                '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                output_path
+            ]
+        elif len(all_clips) == 1:
+            # Un solo fuente de video (sea real o broll)
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', all_clips[0],
                 '-i', audio_path,
                 '-filter_complex', f'[1:a]atrim=0:{audio_dur}[a]',
                 '-map', '0:v', '-map', '[a]',
@@ -776,15 +875,25 @@ def process_digest():
                 output_path
             ]
         else:
-            # Fallback: fondo negro liso
+            # Concatenar todos los clips (reales + pexels)
+            concat_txt = f"{tmp}/digest_concat.txt"
+            with open(concat_txt, 'w') as f:
+                for p in all_clips:
+                    f.write(f"file '{p}'\n")
+            combined = f"{tmp}/combined.mp4"
+            subprocess.run([
+                'ffmpeg', '-y',
+                '-f', 'concat', '-safe', '0', '-i', concat_txt,
+                '-t', str(audio_dur),
+                '-c:v', 'libx264', '-preset', 'fast', '-r', '24', '-pix_fmt', 'yuv420p',
+                combined
+            ], check=True, capture_output=True)
             cmd = [
                 'ffmpeg', '-y',
-                '-f', 'lavfi', '-i', f'color=c=0x0a0a0a:size=1280x720:rate=24',
+                '-i', combined,
                 '-i', audio_path,
-                '-filter_complex',
-                f'[0:v]trim=0:{audio_dur},setpts=PTS-STARTPTS[v];'
-                f'[1:a]atrim=0:{audio_dur}[a]',
-                '-map', '[v]', '-map', '[a]',
+                '-filter_complex', f'[1:a]atrim=0:{audio_dur}[a]',
+                '-map', '0:v', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
                 '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
