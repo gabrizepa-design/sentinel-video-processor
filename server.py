@@ -863,21 +863,25 @@ def process_short_v4():
 
         # 4. Quemar lower thirds si hay subtitulos
         ass_content = _create_lower_thirds_ass(subtitulos_clave, audio_dur, 720, 1280, vertical=True)
+        video_final = video_raw
         if ass_content:
             ass_path = f"{tmp}/subs_short.ass"
             with open(ass_path, 'w', encoding='utf-8') as f:
                 f.write(ass_content)
             video_with_subs = f"{tmp}/short_subs.mp4"
             ass_escaped = ass_path.replace('\\', '/').replace(':', '\\:')
-            subprocess.run([
-                'ffmpeg', '-y', '-i', video_raw,
-                '-vf', f"ass={ass_escaped}",
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-r', '24', '-pix_fmt', 'yuv420p', '-an', video_with_subs
-            ], check=True, capture_output=True)
-            video_final = video_with_subs
-        else:
-            video_final = video_raw
+            try:
+                subprocess.run([
+                    'ffmpeg', '-y', '-i', video_raw,
+                    '-vf', f"ass={ass_escaped}",
+                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                    '-r', '24', '-pix_fmt', 'yuv420p', '-an', video_with_subs
+                ], check=True, capture_output=True)
+                video_final = video_with_subs
+                print(f'[short] lower thirds burned OK ({len(subtitulos_clave)} subs)')
+            except subprocess.CalledProcessError as e:
+                print(f'[short] ASS subtitle burn FAILED: {e.stderr[:200] if e.stderr else ""}')
+                print('[short] continuing without subtitles')
 
         # 5. Mezclar video + audio
         subprocess.run([
@@ -972,24 +976,27 @@ def process_digest():
 
         # 4. Quemar lower thirds si hay subtitulos
         ass_content = _create_lower_thirds_ass(subtitulos_clave, audio_dur, 1280, 720)
+        video_final = video_raw
         if ass_content:
             ass_path = f"{tmp}/subs.ass"
             with open(ass_path, 'w', encoding='utf-8') as f:
                 f.write(ass_content)
             video_with_subs = f"{tmp}/video_subs.mp4"
-            # Escapar path para filtro FFmpeg (backslashes en Windows, colons)
             ass_escaped = ass_path.replace('\\', '/').replace(':', '\\:')
-            subprocess.run([
-                'ffmpeg', '-y',
-                '-i', video_raw,
-                '-vf', f"ass={ass_escaped}",
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-r', '24', '-pix_fmt', 'yuv420p',
-                '-an', video_with_subs
-            ], check=True, capture_output=True)
-            video_final = video_with_subs
-        else:
-            video_final = video_raw
+            try:
+                subprocess.run([
+                    'ffmpeg', '-y',
+                    '-i', video_raw,
+                    '-vf', f"ass={ass_escaped}",
+                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                    '-r', '24', '-pix_fmt', 'yuv420p',
+                    '-an', video_with_subs
+                ], check=True, capture_output=True)
+                video_final = video_with_subs
+                print(f'[digest] lower thirds burned OK ({len(subtitulos_clave)} subs)')
+            except subprocess.CalledProcessError as e:
+                print(f'[digest] ASS subtitle burn FAILED (libass missing?): {e.stderr[:200] if e.stderr else ""}')
+                print('[digest] continuing without subtitles')
 
         # 5. Mezclar video + audio
         subprocess.run([
