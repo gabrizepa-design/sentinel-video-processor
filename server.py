@@ -417,7 +417,10 @@ FONT_PATHS = [
     '/usr/share/fonts/ttf-dejavu/DejaVuSans-Bold.ttf',
 ]
 
-_FONT_URL = 'https://github.com/dejavu-fonts/dejavu-fonts/raw/main/ttf/DejaVuSans-Bold.ttf'
+_FONT_URLS = [
+    'https://cdn.jsdelivr.net/gh/dejavu-fonts/dejavu-fonts@master/ttf/DejaVuSans-Bold.ttf',
+    'https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf',
+]
 
 def _ensure_font():
     """Descarga DejaVuSans-Bold a /tmp si no existe en ninguna ruta del sistema."""
@@ -427,11 +430,14 @@ def _ensure_font():
     for path in FONT_PATHS[1:]:
         if os.path.exists(path):
             return
-    try:
-        import urllib.request
-        urllib.request.urlretrieve(_FONT_URL, cached)
-    except Exception:
-        pass
+    import urllib.request
+    for url in _FONT_URLS:
+        try:
+            urllib.request.urlretrieve(url, cached)
+            if os.path.getsize(cached) > 10000:  # verifica descarga real
+                return
+        except Exception:
+            continue
 
 _ensure_font()  # ejecutar una vez al arrancar el módulo
 
