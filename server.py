@@ -117,6 +117,84 @@ def _extract_real_videos(article_urls, tmp, width=1280, height=720, max_per_arti
     return clips
 
 
+def _fmt_ass_time(seconds):
+    """Convierte segundos a formato ASS: H:MM:SS.cc"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    cs = int((seconds % 1) * 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _create_lower_thirds_ass(subtitles, total_dur, width=1280, height=720, vertical=False):
+    """Genera archivo ASS con lower thirds estilo noticiero.
+    subtitles: lista de strings con datos clave.
+    Retorna contenido ASS como string."""
+    if not subtitles:
+        return None
+
+    # Fuente y tamaño segun orientacion
+    font_size = 28 if not vertical else 24
+    margin_v = 40 if not vertical else 60
+    margin_l = 30
+    margin_r = 30
+
+    # Colores ASS: &HAABBGGRR (alpha, blue, green, red)
+    # PrimaryColour: blanco, OutlineColour: negro, BackColour: fondo semi-transparente oscuro
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {width}\n"
+        f"PlayResY: {height}\n"
+        "WrapStyle: 0\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: LowerThird,DejaVu Sans,{font_size},"
+        "&H00FFFFFF,&H000000FF,&H00000000,&HC0000000,"
+        "1,0,0,0,100,100,1,0,3,2,0,"
+        f"1,{margin_l},{margin_r},{margin_v},1\n"
+        f"Style: Accent,DejaVu Sans,{font_size},"
+        "&H0000BFFF,&H000000FF,&H00000000,&HC0000000,"
+        "1,0,0,0,100,100,1,0,3,2,0,"
+        f"1,{margin_l},{margin_r},{margin_v},1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    events = []
+    n = len(subtitles)
+    # Empezar a los 15s (despues del cold open), terminar 15s antes del final
+    start_offset = 15.0
+    end_offset = total_dur - 15.0
+    if end_offset <= start_offset:
+        start_offset = 5.0
+        end_offset = total_dur - 5.0
+
+    usable = end_offset - start_offset
+    interval = usable / n
+    show_dur = min(interval - 1.0, 7.0)  # cada uno visible 5-7s con 1s de gap
+
+    for i, text in enumerate(subtitles):
+        t_start = start_offset + i * interval
+        t_end = t_start + show_dur
+        # Sanitizar texto para ASS (sin llaves, sin newlines)
+        clean = text.replace('{', '(').replace('}', ')').replace('\n', ' ').strip()
+        # Alternar estilo: datos con numeros en color acento
+        style = 'LowerThird'
+        if any(c.isdigit() for c in clean):
+            style = 'Accent'
+        events.append(
+            f"Dialogue: 0,{_fmt_ass_time(t_start)},{_fmt_ass_time(t_end)},{style},,0,0,0,,"
+            f"{{\\an1}}{clean}\n"
+        )
+
+    return header + ''.join(events)
+
+
 def _normalize_clip(src, dst, width=1280, height=720, max_dur=30):
     """Re-encoda clip a resolución objetivo, máx max_dur segundos, sin audio."""
     vf = (f'scale={width}:{height}:force_original_aspect_ratio=increase,'
@@ -706,14 +784,15 @@ def process_short_v3():
 
 @app.route('/process_short_v4', methods=['POST'])
 def process_short_v4():
-    """Short vertical 720x1280.
-    Prioridad: 0) og:video MP4 directo → 1) og:image blurred → 2) Pexels B-Roll → 3) negro."""
-    og_video_url = request.form.get('og_video_url', '').strip()
-    image_url    = request.form.get('image_url', '').strip()
-    stock_urls   = json.loads(request.form.get('stock_urls', '[]'))
-    audio_file   = (request.files.get('audio')
-                    or request.files.get('audio_mp3')
-                    or next(iter(request.files.values()), None))
+    """Short vertical 720x1280 con lower thirds.
+    Prioridad: 0) og:video MP4 directo → 1) Pexels B-Roll → 2) negro."""
+    og_video_url     = request.form.get('og_video_url', '').strip()
+    image_url        = request.form.get('image_url', '').strip()
+    stock_urls       = json.loads(request.form.get('stock_urls', '[]'))
+    subtitulos_clave = json.loads(request.form.get('subtitulos_clave', '[]'))
+    audio_file       = (request.files.get('audio')
+                        or request.files.get('audio_mp3')
+                        or next(iter(request.files.values()), None))
 
     if not audio_file:
         return {'error': 'Missing audio'}, 400
@@ -766,38 +845,53 @@ def process_short_v4():
             if broll_path:
                 video_input = broll_path
 
-        # 3. Combinar video + audio
+        # 3. Construir video base sin audio
+        video_raw = f"{tmp}/short_raw.mp4"
         if video_input:
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', video_input,
-                '-i', audio_path,
-                '-filter_complex', f'[1:a]atrim=0:{audio_dur}[a]',
-                '-map', '0:v', '-map', '[a]',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '128k',
-                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+            subprocess.run([
+                'ffmpeg', '-y', '-i', video_input,
                 '-t', '60',
-                output_path
-            ]
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-r', '24', '-pix_fmt', 'yuv420p', '-an', video_raw
+            ], check=True, capture_output=True)
         else:
-            # Último recurso: fondo negro
-            cmd = [
+            subprocess.run([
                 'ffmpeg', '-y',
                 '-f', 'lavfi', '-i', 'color=c=0x0a0a0a:size=720x1280:rate=24',
-                '-i', audio_path,
-                '-filter_complex',
-                f'[0:v]trim=0:{audio_dur},setpts=PTS-STARTPTS[v];'
-                f'[1:a]atrim=0:{audio_dur}[a]',
-                '-map', '[v]', '-map', '[a]',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '128k',
-                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                '-t', '60',
-                output_path
-            ]
+                '-t', str(audio_dur), '-pix_fmt', 'yuv420p', video_raw
+            ], check=True, capture_output=True)
 
-        subprocess.run(cmd, check=True, capture_output=True)
+        # 4. Quemar lower thirds si hay subtitulos
+        ass_content = _create_lower_thirds_ass(subtitulos_clave, audio_dur, 720, 1280, vertical=True)
+        if ass_content:
+            ass_path = f"{tmp}/subs_short.ass"
+            with open(ass_path, 'w', encoding='utf-8') as f:
+                f.write(ass_content)
+            video_with_subs = f"{tmp}/short_subs.mp4"
+            ass_escaped = ass_path.replace('\\', '/').replace(':', '\\:')
+            subprocess.run([
+                'ffmpeg', '-y', '-i', video_raw,
+                '-vf', f"ass={ass_escaped}",
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-r', '24', '-pix_fmt', 'yuv420p', '-an', video_with_subs
+            ], check=True, capture_output=True)
+            video_final = video_with_subs
+        else:
+            video_final = video_raw
+
+        # 5. Mezclar video + audio
+        subprocess.run([
+            'ffmpeg', '-y',
+            '-i', video_final,
+            '-i', audio_path,
+            '-filter_complex', f'[1:a]atrim=0:{audio_dur}[a]',
+            '-map', '0:v', '-map', '[a]',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
+            '-t', '60',
+            output_path
+        ], check=True, capture_output=True)
 
         with open(output_path, 'rb') as f:
             data = f.read()
@@ -812,12 +906,13 @@ def process_short_v4():
 
 @app.route('/process_digest', methods=['POST'])
 def process_digest():
-    """Daily Digest v2: real news videos + Pexels fallback, max 14 min. 1280x720."""
-    stock_urls   = json.loads(request.form.get('stock_urls', '[]'))
-    article_urls = json.loads(request.form.get('article_urls', '[]'))
-    audio_file   = (request.files.get('audio')
-                    or request.files.get('audio_mp3')
-                    or next(iter(request.files.values()), None))
+    """Daily Digest v3: real videos + Pexels + lower thirds, max 14 min. 1280x720."""
+    stock_urls      = json.loads(request.form.get('stock_urls', '[]'))
+    article_urls    = json.loads(request.form.get('article_urls', '[]'))
+    subtitulos_clave = json.loads(request.form.get('subtitulos_clave', '[]'))
+    audio_file      = (request.files.get('audio')
+                       or request.files.get('audio_mp3')
+                       or next(iter(request.files.values()), None))
 
     if not audio_file:
         return {'error': 'Missing audio'}, 400
@@ -826,6 +921,7 @@ def process_digest():
 
     with tempfile.TemporaryDirectory() as tmp:
         audio_path  = f"{tmp}/audio.mp3"
+        video_raw   = f"{tmp}/video_raw.mp4"
         output_path = f"{tmp}/digest.mp4"
 
         audio_file.save(audio_path)
@@ -844,63 +940,69 @@ def process_digest():
             if broll_path:
                 pexels_clips = [broll_path]
 
-        # 3. Combinar: real clips primero + Pexels para el resto
+        # 3. Construir video base (sin audio, sin subs)
         all_clips = real_clips + pexels_clips
         if not all_clips:
-            # Ultimo recurso: fondo negro
-            cmd = [
+            # Fondo negro
+            subprocess.run([
                 'ffmpeg', '-y',
                 '-f', 'lavfi', '-i', 'color=c=0x0a0a0a:size=1280x720:rate=24',
-                '-i', audio_path,
-                '-filter_complex',
-                f'[0:v]trim=0:{audio_dur},setpts=PTS-STARTPTS[v];'
-                f'[1:a]atrim=0:{audio_dur}[a]',
-                '-map', '[v]', '-map', '[a]',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '128k',
-                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                output_path
-            ]
+                '-t', str(audio_dur), '-pix_fmt', 'yuv420p', video_raw
+            ], check=True, capture_output=True)
         elif len(all_clips) == 1:
-            # Un solo fuente de video (sea real o broll)
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', all_clips[0],
-                '-i', audio_path,
-                '-filter_complex', f'[1:a]atrim=0:{audio_dur}[a]',
-                '-map', '0:v', '-map', '[a]',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '128k',
-                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                output_path
-            ]
+            # Copiar o trim al tamanio correcto
+            subprocess.run([
+                'ffmpeg', '-y', '-i', all_clips[0],
+                '-t', str(audio_dur),
+                '-c:v', 'libx264', '-preset', 'fast', '-r', '24', '-pix_fmt', 'yuv420p',
+                '-an', video_raw
+            ], check=True, capture_output=True)
         else:
-            # Concatenar todos los clips (reales + pexels)
             concat_txt = f"{tmp}/digest_concat.txt"
             with open(concat_txt, 'w') as f:
                 for p in all_clips:
                     f.write(f"file '{p}'\n")
-            combined = f"{tmp}/combined.mp4"
             subprocess.run([
                 'ffmpeg', '-y',
                 '-f', 'concat', '-safe', '0', '-i', concat_txt,
                 '-t', str(audio_dur),
                 '-c:v', 'libx264', '-preset', 'fast', '-r', '24', '-pix_fmt', 'yuv420p',
-                combined
+                '-an', video_raw
             ], check=True, capture_output=True)
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', combined,
-                '-i', audio_path,
-                '-filter_complex', f'[1:a]atrim=0:{audio_dur}[a]',
-                '-map', '0:v', '-map', '[a]',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '128k',
-                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                output_path
-            ]
 
-        subprocess.run(cmd, check=True, capture_output=True)
+        # 4. Quemar lower thirds si hay subtitulos
+        ass_content = _create_lower_thirds_ass(subtitulos_clave, audio_dur, 1280, 720)
+        if ass_content:
+            ass_path = f"{tmp}/subs.ass"
+            with open(ass_path, 'w', encoding='utf-8') as f:
+                f.write(ass_content)
+            video_with_subs = f"{tmp}/video_subs.mp4"
+            # Escapar path para filtro FFmpeg (backslashes en Windows, colons)
+            ass_escaped = ass_path.replace('\\', '/').replace(':', '\\:')
+            subprocess.run([
+                'ffmpeg', '-y',
+                '-i', video_raw,
+                '-vf', f"ass={ass_escaped}",
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-r', '24', '-pix_fmt', 'yuv420p',
+                '-an', video_with_subs
+            ], check=True, capture_output=True)
+            video_final = video_with_subs
+        else:
+            video_final = video_raw
+
+        # 5. Mezclar video + audio
+        subprocess.run([
+            'ffmpeg', '-y',
+            '-i', video_final,
+            '-i', audio_path,
+            '-filter_complex', f'[1:a]atrim=0:{audio_dur}[a]',
+            '-map', '0:v', '-map', '[a]',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
+            output_path
+        ], check=True, capture_output=True)
 
         with open(output_path, 'rb') as f:
             data = f.read()
