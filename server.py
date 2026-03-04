@@ -61,6 +61,7 @@ def _normalize_clip(src, dst, width=1280, height=720, max_dur=30):
         'ffmpeg', '-y', '-i', src, '-t', str(max_dur),
         '-vf', vf,
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-r', '24', '-pix_fmt', 'yuv420p',
         '-an', dst
     ], check=True, capture_output=True)
 
@@ -93,7 +94,7 @@ def _build_broll(tmp, stock_urls, body_dur, width=1280, height=720, max_clips=4)
             'ffmpeg', '-y',
             '-stream_loop', '-1', '-i', norm_clips[0],
             '-t', str(body_dur),
-            '-c:v', 'libx264', '-preset', 'fast',
+            '-c:v', 'libx264', '-preset', 'fast', '-r', '24', '-pix_fmt', 'yuv420p',
             broll_path
         ], check=True, capture_output=True)
         return broll_path
@@ -114,7 +115,7 @@ def _build_broll(tmp, stock_urls, body_dur, width=1280, height=720, max_clips=4)
         'ffmpeg', '-y',
         '-f', 'concat', '-safe', '0', '-i', concat_txt,
         '-t', str(body_dur),
-        '-c:v', 'libx264', '-preset', 'fast',
+        '-c:v', 'libx264', '-preset', 'fast', '-r', '24', '-pix_fmt', 'yuv420p',
         broll_path
     ], check=True, capture_output=True)
     return broll_path
@@ -158,6 +159,7 @@ def process():
             '-map', '[v]', '-map', '[a]',
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
             '-c:a', 'aac', '-b:a', '128k',
+            '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
             output_path
         ]
         subprocess.run(cmd, check=True, capture_output=True)
@@ -211,6 +213,7 @@ def process_short():
             '-map', '[v]', '-map', '[a]',
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
             '-c:a', 'aac', '-b:a', '128k',
+            '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
             '-t', '60',
             output_path
         ]
@@ -264,6 +267,7 @@ def process_v2():
                 '-map', '[v]', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 output_path
             ]
         else:
@@ -281,6 +285,7 @@ def process_v2():
                 '-map', '[v]', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 output_path
             ]
 
@@ -338,6 +343,7 @@ def process_short_v2():
                 '-map', '[v]', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 '-t', '60',
                 output_path
             ]
@@ -357,6 +363,7 @@ def process_short_v2():
                 '-map', '[v]', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 '-t', '60',
                 output_path
             ]
@@ -595,6 +602,7 @@ def process_short_v3():
                 '-map', '0:v', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 '-t', '60',
                 output_path
             ]
@@ -610,6 +618,7 @@ def process_short_v3():
                 '-map', '[v]', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 '-t', '60',
                 output_path
             ]
@@ -675,7 +684,7 @@ def process_short_v4():
                     '-vf', vf,
                     '-t', str(audio_dur),
                     '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                    '-pix_fmt', 'yuv420p',
+                    '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                     img_clip_path
                 ]
                 subprocess.run(cmd_img, check=True, capture_output=True)
@@ -699,6 +708,7 @@ def process_short_v4():
                 '-map', '0:v', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 '-t', '60',
                 output_path
             ]
@@ -714,6 +724,7 @@ def process_short_v4():
                 '-map', '[v]', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 '-t', '60',
                 output_path
             ]
@@ -761,6 +772,7 @@ def process_digest():
                 '-map', '0:v', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 output_path
             ]
         else:
@@ -775,6 +787,7 @@ def process_digest():
                 '-map', '[v]', '-map', '[a]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                 output_path
             ]
 
