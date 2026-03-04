@@ -690,42 +690,9 @@ def process_short_v4():
                             video_input = vid_loop
                         app.logger.info(f'og:video OK — {og_video_url[:60]}')
             except Exception as e:
-                app.logger.warning(f'og:video falló ({e}), intentando og:image')
+                app.logger.warning(f'og:video falló ({e}), usando Pexels')
 
-        # 1. Intentar og:image como fondo principal
-        if not video_input and image_url:
-            try:
-                img_path      = f"{tmp}/og_image.jpg"
-                img_clip_path = f"{tmp}/image_clip.mp4"
-
-                resp = requests.get(image_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-                resp.raise_for_status()
-                with open(img_path, 'wb') as fh:
-                    fh.write(resp.content)
-
-                # Blurred background + imagen centrada sin distorsión
-                vf = (
-                    'split=2[bg][fg];'
-                    '[bg]scale=720:1280:force_original_aspect_ratio=increase,'
-                    'crop=720:1280,gblur=sigma=20[bgblur];'
-                    '[fg]scale=720:1280:force_original_aspect_ratio=decrease[fgscale];'
-                    '[bgblur][fgscale]overlay=(W-w)/2:(H-h)/2'
-                )
-                cmd_img = [
-                    'ffmpeg', '-y',
-                    '-loop', '1', '-i', img_path,
-                    '-vf', vf,
-                    '-t', str(audio_dur),
-                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                    '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                    img_clip_path
-                ]
-                subprocess.run(cmd_img, check=True, capture_output=True)
-                video_input = img_clip_path
-            except Exception as e:
-                app.logger.warning(f'og:image falló ({e}), usando Pexels')
-
-        # 2. Fallback: B-Roll Pexels
+        # 1. B-Roll Pexels (video en movimiento, siempre preferido sobre imagen estática)
         if not video_input:
             broll_path = _build_broll(tmp, stock_urls, audio_dur, width=720, height=1280)
             if broll_path:
