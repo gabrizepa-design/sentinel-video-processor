@@ -16,7 +16,23 @@ BACKGROUNDS = {
 
 @app.route('/health')
 def health():
-    return {'status': 'ok'}
+    import shutil
+    ytdlp_path = shutil.which('yt-dlp')
+    ytdlp_version = None
+    if ytdlp_path:
+        try:
+            r = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, timeout=5)
+            ytdlp_version = r.stdout.strip()
+        except Exception:
+            ytdlp_version = 'error'
+    return {
+        'status': 'ok',
+        'ytdlp_installed': ytdlp_path is not None,
+        'ytdlp_path': ytdlp_path,
+        'ytdlp_version': ytdlp_version,
+        'youtube_api_key_set': bool(YOUTUBE_API_KEY),
+        'youtube_api_key_prefix': YOUTUBE_API_KEY[:8] + '...' if YOUTUBE_API_KEY else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +114,9 @@ def _extract_video_from_article(article_url):
                 print(f'[extract] YouTube embed encontrado: {yt_url}')
                 return ('ytdlp_url', yt_url)
 
-        # 4. Intentar yt-dlp directamente en el artículo (soporta 1000+ sitios)
-        return ('ytdlp_url', article_url)
+        # No se encontró video extraíble — no intentar yt-dlp en URLs de noticias genéricas
+        # (Reuters, AP, BBC tienen paywalls/players propietarios que yt-dlp no puede descargar)
+        return (None, None)
 
     except Exception as e:
         print(f'[extract] {article_url[:60]}: {e}')
