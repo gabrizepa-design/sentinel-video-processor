@@ -98,8 +98,9 @@ def _extract_video_from_article(article_url):
                 print(f'[extract] YouTube embed encontrado: {yt_url}')
                 return ('ytdlp_url', yt_url)
 
-        # 4. Intentar yt-dlp directamente en el artículo (soporta 1000+ sitios)
-        return ('ytdlp_url', article_url)
+        # No se encontró video extraíble — no intentar yt-dlp en URLs de noticias genéricas
+        # (Reuters, AP, BBC tienen paywalls/players propietarios que yt-dlp no puede descargar)
+        return (None, None)
 
     except Exception as e:
         print(f'[extract] {article_url[:60]}: {e}')
