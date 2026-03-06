@@ -16,7 +16,23 @@ BACKGROUNDS = {
 
 @app.route('/health')
 def health():
-    return {'status': 'ok'}
+    import shutil
+    ytdlp_path = shutil.which('yt-dlp')
+    ytdlp_version = None
+    if ytdlp_path:
+        try:
+            r = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, timeout=5)
+            ytdlp_version = r.stdout.strip()
+        except Exception:
+            ytdlp_version = 'error'
+    return {
+        'status': 'ok',
+        'ytdlp_installed': ytdlp_path is not None,
+        'ytdlp_path': ytdlp_path,
+        'ytdlp_version': ytdlp_version,
+        'youtube_api_key_set': bool(YOUTUBE_API_KEY),
+        'youtube_api_key_prefix': YOUTUBE_API_KEY[:8] + '...' if YOUTUBE_API_KEY else None,
+    }
 
 
 # ---------------------------------------------------------------------------
