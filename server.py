@@ -35,6 +35,36 @@ def health():
     }
 
 
+@app.route('/test-broll')
+def test_broll():
+    """Endpoint de diagnóstico: prueba búsqueda YouTube CC y devuelve resultado."""
+    query = request.args.get('q', 'military technology AI')
+    import tempfile, traceback
+    results = []
+    error = None
+    try:
+        search_url = (
+            'https://www.googleapis.com/youtube/v3/search'
+            f'?part=snippet&q={requests.utils.quote(query)}'
+            '&type=video&videoLicense=creativeCommon&maxResults=3'
+            f'&key={YOUTUBE_API_KEY}'
+        )
+        r = requests.get(search_url, timeout=10)
+        data = r.json()
+        if 'error' in data:
+            error = data['error']
+        else:
+            for item in data.get('items', []):
+                vid = item['id'].get('videoId')
+                title = item['snippet']['title']
+                results.append({'videoId': vid, 'title': title,
+                                'url': f'https://www.youtube.com/watch?v={vid}'})
+    except Exception as e:
+        error = traceback.format_exc()
+    return {'query': query, 'results': results, 'error': error,
+            'youtube_api_key_set': bool(YOUTUBE_API_KEY)}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
