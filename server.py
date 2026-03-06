@@ -53,65 +53,162 @@ def _download(url, path):
             f.write(chunk)
 
 
-def _extract_og_video(article_url):
-    """Intenta extraer og:video o video embebido de una URL de noticia.
-    Retorna URL del video MP4 o None."""
+def _extract_video_from_article(article_url):
+    """Extrae video de un artículo de noticias con estrategia en capas.
+    Retorna ('mp4_url', url) | ('ytdlp_url', url) | (None, None)"""
     try:
-        r = requests.get(article_url, timeout=10,
-                         headers={'User-Agent': 'Mozilla/5.0 Sentinel/5.0'},
+        r = requests.get(article_url, timeout=15,
+                         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'},
                          allow_redirects=True)
         r.raise_for_status()
-        html = r.text[:50000]  # solo primeros 50KB
+        html = r.text  # leer TODO el HTML, no solo 50KB
 
-        # 1. og:video con MP4
-        m = re.search(r'<meta[^>]+property=["\']og:video(?::url)?["\'][^>]+content=["\'](https?://[^"\']+\.mp4[^"\']*)["\']', html, re.I)
-        if not m:
-            m = re.search(r'<meta[^>]+content=["\'](https?://[^"\']+\.mp4[^"\']*)["\'][^>]+property=["\']og:video', html, re.I)
-        if m:
-            return m.group(1)
+        # 1. og:video / og:video:url / og:video:secure_url con MP4 directo
+        for prop in ['og:video:secure_url', 'og:video:url', 'og:video']:
+            ep = re.escape(prop)
+            m = re.search(
+                r'<meta[^>]+property=["\']' + ep + r'["\'][^>]+content=["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
+                html, re.I)
+            if not m:
+                m = re.search(
+                    r'<meta[^>]+content=["\'](https?://[^"\']+\.mp4[^"\']*)["\'][^>]+property=["\']' + ep + r'["\']',
+                    html, re.I)
+            if m:
+                return ('mp4_url', m.group(1))
 
-        # 2. og:video generico (puede ser iframe/embed — solo si es MP4)
-        m = re.search(r'<meta[^>]+property=["\']og:video["\'][^>]+content=["\'](https?://[^"\']+)["\']', html, re.I)
-        if m and '.mp4' in m.group(1).lower():
-            return m.group(1)
+        # 2. <video> / <source> con src MP4
+        for pattern in [
+            r'<source[^>]+src=["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
+            r'<video[^>]+src=["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
+        ]:
+            m = re.search(pattern, html, re.I)
+            if m:
+                return ('mp4_url', m.group(1))
 
-        # 3. <video><source src="...mp4">
-        m = re.search(r'<source[^>]+src=["\'](https?://[^"\']+\.mp4[^"\']*)["\']', html, re.I)
-        if m:
-            return m.group(1)
+        # 3. YouTube iframe embed — muy común en BBC, CNN, Reuters, etc.
+        for pattern in [
+            r'youtube\.com/embed/([a-zA-Z0-9_-]{11})',
+            r'youtube-nocookie\.com/embed/([a-zA-Z0-9_-]{11})',
+            r'youtube\.com/v/([a-zA-Z0-9_-]{11})',
+            r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
+        ]:
+            m = re.search(pattern, html, re.I)
+            if m:
+                yt_url = f'https://www.youtube.com/watch?v={m.group(1)}'
+                print(f'[extract] YouTube embed encontrado: {yt_url}')
+                return ('ytdlp_url', yt_url)
 
-        # 4. <video src="...mp4">
-        m = re.search(r'<video[^>]+src=["\'](https?://[^"\']+\.mp4[^"\']*)["\']', html, re.I)
-        if m:
-            return m.group(1)
+        # 4. Intentar yt-dlp directamente en el artículo (soporta 1000+ sitios)
+        return ('ytdlp_url', article_url)
 
     except Exception as e:
-        print(f'[og:video] {article_url[:60]}: {e}')
-    return None
+        print(f'[extract] {article_url[:60]}: {e}')
+    return (None, None)
+
+
+def _ytdlp_download(url, output_path, max_dur=60):
+    """Descarga video usando yt-dlp. Retorna True si éxito."""
+    try:
+        result = subprocess.run([
+            'yt-dlp',
+            '--no-playlist',
+            '--format', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best[height<=720]',
+            '--merge-output-format', 'mp4',
+            '--output', output_path,
+            '--no-warnings',
+            '--quiet',
+            '--socket-timeout', '30',
+            url
+        ], capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 50000:
+            return True
+        print(f'[yt-dlp] FAILED ({url[:60]}): {result.stderr[:200]}')
+    except Exception as e:
+        print(f'[yt-dlp] error: {e}')
+    return False
+
+
+YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
+
+
+def _search_youtube_broll(query, tmp, width=1280, height=720, max_clips=3):
+    """Busca videos CC en YouTube y descarga los primeros max_clips resultados.
+    Retorna lista de paths a clips normalizados. Requiere YOUTUBE_API_KEY env var."""
+    if not YOUTUBE_API_KEY or not query:
+        return []
+
+    try:
+        resp = requests.get(
+            'https://www.googleapis.com/youtube/v3/search',
+            params={
+                'part': 'snippet',
+                'q': query,
+                'type': 'video',
+                'videoLicense': 'creativeCommon',
+                'maxResults': max_clips + 2,  # pedir de más por si alguno falla
+                'videoDuration': 'medium',    # 4-20 min — clips usables
+                'order': 'relevance',
+                'key': YOUTUBE_API_KEY,
+            },
+            timeout=15
+        )
+        resp.raise_for_status()
+        items = resp.json().get('items', [])
+    except Exception as e:
+        print(f'[yt-search] API error: {e}')
+        return []
+
+    clips = []
+    for i, item in enumerate(items):
+        if len(clips) >= max_clips:
+            break
+        vid_id = item.get('id', {}).get('videoId')
+        if not vid_id:
+            continue
+        yt_url = f'https://www.youtube.com/watch?v={vid_id}'
+        raw  = f"{tmp}/yt_broll_raw_{i}.mp4"
+        norm = f"{tmp}/yt_broll_norm_{i}.mp4"
+        try:
+            if not _ytdlp_download(yt_url, raw):
+                continue
+            _normalize_clip(raw, norm, width=width, height=height, max_dur=30)
+            dur = _get_video_duration(norm)
+            if dur > 1.0:
+                clips.append(norm)
+                title = item.get('snippet', {}).get('title', '')[:50]
+                print(f'[yt-broll] clip {i} OK: {title} ({dur:.0f}s)')
+        except Exception as e:
+            print(f'[yt-broll] clip {i} FAILED: {e}')
+
+    return clips
 
 
 def _extract_real_videos(article_urls, tmp, width=1280, height=720, max_per_article=60):
-    """Para cada URL de articulo, intenta extraer y normalizar el video real.
-    Retorna lista de paths a clips normalizados (puede estar vacia)."""
+    """Para cada URL de articulo, extrae y normaliza el video real.
+    Estrategia: MP4 directo → YouTube embed → yt-dlp en el artículo.
+    Retorna lista de paths a clips normalizados (puede estar vacía)."""
     clips = []
     for i, url in enumerate(article_urls):
         if not url or not url.startswith('http'):
             continue
-        video_url = _extract_og_video(url)
-        if not video_url:
+        vtype, vval = _extract_video_from_article(url)
+        if not vtype:
             continue
         raw  = f"{tmp}/real_raw_{i}.mp4"
         norm = f"{tmp}/real_norm_{i}.mp4"
         try:
-            _download(video_url, raw)
-            fsize = os.path.getsize(raw)
-            if fsize < 50000:  # <50KB = probablemente error HTML
-                continue
+            if vtype == 'mp4_url':
+                _download(vval, raw)
+                if os.path.getsize(raw) < 50000:
+                    continue
+            elif vtype == 'ytdlp_url':
+                if not _ytdlp_download(vval, raw, max_dur=max_per_article):
+                    continue
             _normalize_clip(raw, norm, width=width, height=height, max_dur=max_per_article)
             dur = _get_video_duration(norm)
             if dur > 1.0:
                 clips.append(norm)
-                print(f'[real] clip {i} OK: {video_url[:60]} ({dur:.0f}s)')
+                print(f'[real] clip {i} OK via {vtype}: {vval[:60]} ({dur:.0f}s)')
         except Exception as e:
             print(f'[real] clip {i} FAILED: {e}')
     return clips
@@ -785,11 +882,13 @@ def process_short_v3():
 @app.route('/process_short_v4', methods=['POST'])
 def process_short_v4():
     """Short vertical 720x1280 con lower thirds.
-    Prioridad: 0) og:video MP4 directo → 1) Pexels B-Roll → 2) negro."""
+    Prioridad: 0) og:video/yt-dlp del artículo → 1) YouTube CC broll → 2) Pexels → 3) negro."""
     og_video_url     = request.form.get('og_video_url', '').strip()
+    article_url      = request.form.get('article_url', '').strip()  # URL del artículo para yt-dlp
     image_url        = request.form.get('image_url', '').strip()
     stock_urls       = json.loads(request.form.get('stock_urls', '[]'))
     subtitulos_clave = json.loads(request.form.get('subtitulos_clave', '[]'))
+    broll_query      = request.form.get('broll_query', '').strip()
     audio_file       = (request.files.get('audio')
                         or request.files.get('audio_mp3')
                         or next(iter(request.files.values()), None))
@@ -807,7 +906,7 @@ def process_short_v4():
 
         video_input = None
 
-        # 0. Intentar og:video (MP4 directo de la noticia) — máxima relevancia
+        # 0a. og:video URL explícita (MP4 directo)
         if og_video_url:
             try:
                 vid_raw  = f"{tmp}/og_video_raw.mp4"
@@ -815,7 +914,7 @@ def process_short_v4():
                 resp = requests.get(og_video_url, timeout=15,
                                     headers={'User-Agent': 'Mozilla/5.0 Sentinel/4.0'})
                 resp.raise_for_status()
-                if len(resp.content) > 50000:  # mínimo 50 KB — descarta errores HTML
+                if len(resp.content) > 50000:
                     with open(vid_raw, 'wb') as fh:
                         fh.write(resp.content)
                     _normalize_clip(vid_raw, vid_norm, width=720, height=1280, max_dur=60)
@@ -824,22 +923,66 @@ def process_short_v4():
                         if norm_dur >= audio_dur:
                             video_input = vid_norm
                         else:
-                            # Loopear para cubrir toda la duración del audio
                             vid_loop = f"{tmp}/og_video_loop.mp4"
                             subprocess.run([
-                                'ffmpeg', '-y',
-                                '-stream_loop', '-1', '-i', vid_norm,
+                                'ffmpeg', '-y', '-stream_loop', '-1', '-i', vid_norm,
                                 '-t', str(audio_dur),
                                 '-c:v', 'libx264', '-preset', 'fast',
-                                '-r', '24', '-pix_fmt', 'yuv420p',
-                                vid_loop
+                                '-r', '24', '-pix_fmt', 'yuv420p', vid_loop
                             ], check=True, capture_output=True)
                             video_input = vid_loop
-                        app.logger.info(f'og:video OK — {og_video_url[:60]}')
+                        print(f'[short] og:video directo OK')
             except Exception as e:
-                app.logger.warning(f'og:video falló ({e}), usando Pexels')
+                print(f'[short] og:video falló ({e}), intentando extracción del artículo')
 
-        # 1. B-Roll Pexels (video en movimiento, siempre preferido sobre imagen estática)
+        # 0b. Extracción profunda del artículo (YouTube embed / yt-dlp)
+        if not video_input and article_url:
+            vtype, vval = _extract_video_from_article(article_url)
+            if vtype == 'ytdlp_url':
+                vid_raw  = f"{tmp}/article_raw.mp4"
+                vid_norm = f"{tmp}/article_norm.mp4"
+                try:
+                    if _ytdlp_download(vval, vid_raw):
+                        _normalize_clip(vid_raw, vid_norm, width=720, height=1280, max_dur=60)
+                        norm_dur = _get_video_duration(vid_norm)
+                        if norm_dur > 1.0:
+                            if norm_dur >= audio_dur:
+                                video_input = vid_norm
+                            else:
+                                vid_loop = f"{tmp}/article_loop.mp4"
+                                subprocess.run([
+                                    'ffmpeg', '-y', '-stream_loop', '-1', '-i', vid_norm,
+                                    '-t', str(audio_dur),
+                                    '-c:v', 'libx264', '-preset', 'fast',
+                                    '-r', '24', '-pix_fmt', 'yuv420p', vid_loop
+                                ], check=True, capture_output=True)
+                                video_input = vid_loop
+                            print(f'[short] yt-dlp artículo OK')
+                except Exception as e:
+                    print(f'[short] yt-dlp artículo falló: {e}')
+
+        # 1. YouTube CC B-Roll por keywords
+        if not video_input and broll_query and YOUTUBE_API_KEY:
+            yt_clips = _search_youtube_broll(broll_query, tmp, width=720, height=1280, max_clips=2)
+            if yt_clips:
+                broll_path = _build_broll(tmp, [], audio_dur, width=720, height=1280, max_clips=0) or None
+                concat_txt = f"{tmp}/yt_short_concat.txt"
+                with open(concat_txt, 'w') as f:
+                    needed = max(1, math.ceil(audio_dur / (sum(_get_video_duration(c) for c in yt_clips) or 1)))
+                    for _ in range(needed):
+                        for p in yt_clips:
+                            f.write(f"file '{p}'\n")
+                yt_broll_path = f"{tmp}/yt_short_broll.mp4"
+                subprocess.run([
+                    'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_txt,
+                    '-t', str(audio_dur),
+                    '-c:v', 'libx264', '-preset', 'fast', '-r', '24', '-pix_fmt', 'yuv420p',
+                    yt_broll_path
+                ], check=True, capture_output=True)
+                video_input = yt_broll_path
+                print(f'[short] YouTube CC broll OK')
+
+        # 2. Pexels fallback
         if not video_input:
             broll_path = _build_broll(tmp, stock_urls, audio_dur, width=720, height=1280)
             if broll_path:
@@ -910,13 +1053,14 @@ def process_short_v4():
 
 @app.route('/process_digest', methods=['POST'])
 def process_digest():
-    """Daily Digest v3: real videos + Pexels + lower thirds, max 14 min. 1280x720."""
-    stock_urls      = json.loads(request.form.get('stock_urls', '[]'))
-    article_urls    = json.loads(request.form.get('article_urls', '[]'))
+    """Daily Digest v4: real videos + YouTube CC broll + Pexels fallback + lower thirds, max 14 min. 1280x720."""
+    stock_urls       = json.loads(request.form.get('stock_urls', '[]'))
+    article_urls     = json.loads(request.form.get('article_urls', '[]'))
     subtitulos_clave = json.loads(request.form.get('subtitulos_clave', '[]'))
-    audio_file      = (request.files.get('audio')
-                       or request.files.get('audio_mp3')
-                       or next(iter(request.files.values()), None))
+    broll_query      = request.form.get('broll_query', '').strip()  # keywords para YouTube CC search
+    audio_file       = (request.files.get('audio')
+                        or request.files.get('audio_mp3')
+                        or next(iter(request.files.values()), None))
 
     if not audio_file:
         return {'error': 'Missing audio'}, 400
@@ -936,13 +1080,40 @@ def process_digest():
         real_dur = sum(_get_video_duration(c) for c in real_clips)
         print(f'[digest] {len(real_clips)} real clips, {real_dur:.0f}s total')
 
-        # 2. Calcular cuanto falta cubrir con Pexels
+        # 2. Calcular cuanto falta cubrir con B-roll
         remaining = audio_dur - real_dur
         pexels_clips = []
-        if remaining > 5.0 and stock_urls:
-            broll_path = _build_broll(tmp, stock_urls, remaining, width=1280, height=720, max_clips=12)
-            if broll_path:
-                pexels_clips = [broll_path]
+        if remaining > 5.0:
+            # 2a. Primero intentar YouTube CC (más relevante que Pexels)
+            if broll_query and YOUTUBE_API_KEY:
+                yt_clips = _search_youtube_broll(broll_query, tmp, width=1280, height=720, max_clips=4)
+                if yt_clips:
+                    yt_broll = _build_broll(tmp, [], remaining, width=1280, height=720, max_clips=0)
+                    # Concatenar clips de YouTube directamente
+                    concat_txt = f"{tmp}/yt_concat.txt"
+                    with open(concat_txt, 'w') as f:
+                        needed = max(1, math.ceil(remaining / (sum(_get_video_duration(c) for c in yt_clips) or 1)))
+                        for _ in range(needed):
+                            batch = list(yt_clips)
+                            random.shuffle(batch)
+                            for p in batch:
+                                f.write(f"file '{p}'\n")
+                    yt_broll_path = f"{tmp}/yt_broll_final.mp4"
+                    subprocess.run([
+                        'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_txt,
+                        '-t', str(remaining),
+                        '-c:v', 'libx264', '-preset', 'fast', '-r', '24', '-pix_fmt', 'yuv420p',
+                        yt_broll_path
+                    ], check=True, capture_output=True)
+                    pexels_clips = [yt_broll_path]
+                    print(f'[digest] YouTube CC broll OK: {remaining:.0f}s cubiertos')
+
+            # 2b. Fallback a Pexels si YouTube no funcionó
+            if not pexels_clips and stock_urls:
+                broll_path = _build_broll(tmp, stock_urls, remaining, width=1280, height=720, max_clips=12)
+                if broll_path:
+                    pexels_clips = [broll_path]
+                    print(f'[digest] Pexels broll fallback usado')
 
         # 3. Construir video base (sin audio, sin subs)
         all_clips = real_clips + pexels_clips
