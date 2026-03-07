@@ -27,6 +27,7 @@ def health():
             ytdlp_version = 'error'
     return {
         'status': 'ok',
+        'version': 'v5.3-diag',
         'ytdlp_installed': ytdlp_path is not None,
         'ytdlp_path': ytdlp_path,
         'ytdlp_version': ytdlp_version,
