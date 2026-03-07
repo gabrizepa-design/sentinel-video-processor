@@ -60,7 +60,7 @@ def test_ytdlp():
                 '--output', out,
                 '--socket-timeout', '20',
                 '--quiet',
-                '--js-runtimes', 'nodejs',
+                '--js-runtimes', 'node',
                 test_url
             ], capture_output=True, text=True, timeout=60)
             elapsed = round(time.time() - t0, 1)
@@ -204,7 +204,7 @@ def _ytdlp_download(url, output_path, max_dur=60):
             '--no-warnings',
             '--quiet',
             '--socket-timeout', '30',
-            '--js-runtimes', 'nodejs',
+            '--js-runtimes', 'node',
             url
         ], capture_output=True, text=True, timeout=120)
         if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 50000:
