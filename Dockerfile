@@ -7,3 +7,4 @@ COPY server.py .
 EXPOSE 3000
 CMD ["python3", "server.py"]
 RUN pip3 install --no-cache-dir yt-dlp
+RUN apk add --no-cache ffmpeg python3 py3-pip libass font-dejavu nodejs
