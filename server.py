@@ -54,15 +54,13 @@ def test_ytdlp():
         out = f"{tmp}/test.mp4"
         t0 = time.time()
         try:
-            import shutil as _shutil
-            _node = _shutil.which('node') or 'node'
             result = subprocess.run([
                 'yt-dlp', '--no-playlist',
                 '--format', 'best[ext=mp4][height<=480]/best[height<=480]',
                 '--output', out,
                 '--socket-timeout', '20',
                 '--quiet',
-                '--js-runtimes', f'node:{_node}',
+                '--extractor-args', 'youtube:player_client=android',
                 test_url
             ], capture_output=True, text=True, timeout=60)
             elapsed = round(time.time() - t0, 1)
@@ -196,8 +194,6 @@ def _extract_video_from_article(article_url):
 
 def _ytdlp_download(url, output_path, max_dur=60):
     """Descarga video usando yt-dlp. Retorna True si éxito."""
-    import shutil
-    node_path = shutil.which('node') or 'node'
     try:
         result = subprocess.run([
             'yt-dlp',
@@ -208,7 +204,7 @@ def _ytdlp_download(url, output_path, max_dur=60):
             '--no-warnings',
             '--quiet',
             '--socket-timeout', '30',
-            '--js-runtimes', f'node:{node_path}',
+            '--extractor-args', 'youtube:player_client=android',
             url
         ], capture_output=True, text=True, timeout=120)
         if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 50000:
