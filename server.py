@@ -25,12 +25,21 @@ def health():
             ytdlp_version = r.stdout.strip()
         except Exception:
             ytdlp_version = 'error'
+    node_path = shutil.which('node')
+    node_version = None
+    if node_path:
+        try:
+            nv = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
+            node_version = nv.stdout.strip()
+        except Exception:
+            node_version = 'error'
     return {
         'status': 'ok',
-        'version': 'v5.3-diag',
+        'version': 'v5.4-diag',
         'ytdlp_installed': ytdlp_path is not None,
-        'ytdlp_path': ytdlp_path,
         'ytdlp_version': ytdlp_version,
+        'node_installed': node_path is not None,
+        'node_version': node_version,
         'youtube_api_key_set': bool(YOUTUBE_API_KEY),
         'youtube_api_key_prefix': YOUTUBE_API_KEY[:8] + '...' if YOUTUBE_API_KEY else None,
     }
