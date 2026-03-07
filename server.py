@@ -78,32 +78,29 @@ def test_ytdlp():
 
 @app.route('/test-broll')
 def test_broll():
-    """Endpoint de diagnóstico: prueba búsqueda YouTube CC y devuelve resultado."""
-    query = request.args.get('q', 'military technology AI')
-    import tempfile, traceback
+    """Endpoint de diagnóstico: prueba búsqueda Pixabay y devuelve resultado."""
+    query = request.args.get('q', 'military technology')
+    import traceback
     results = []
     error = None
     try:
-        search_url = (
-            'https://www.googleapis.com/youtube/v3/search'
-            f'?part=snippet&q={requests.utils.quote(query)}'
-            '&type=video&videoLicense=creativeCommon&maxResults=3'
-            f'&key={YOUTUBE_API_KEY}'
+        r = requests.get(
+            'https://pixabay.com/api/videos/',
+            params={'key': PIXABAY_API_KEY, 'q': query, 'per_page': 3, 'safesearch': 'true'},
+            timeout=10
         )
-        r = requests.get(search_url, timeout=10)
         data = r.json()
         if 'error' in data:
             error = data['error']
         else:
-            for item in data.get('items', []):
-                vid = item['id'].get('videoId')
-                title = item['snippet']['title']
-                results.append({'videoId': vid, 'title': title,
-                                'url': f'https://www.youtube.com/watch?v={vid}'})
+            for hit in data.get('hits', []):
+                best = hit['videos'].get('large') or hit['videos'].get('medium') or {}
+                results.append({'id': hit['id'], 'tags': hit.get('tags', ''),
+                                'url': best.get('url', ''), 'width': best.get('width')})
     except Exception as e:
         error = traceback.format_exc()
     return {'query': query, 'results': results, 'error': error,
-            'youtube_api_key_set': bool(YOUTUBE_API_KEY)}
+            'pixabay_api_key_set': bool(PIXABAY_API_KEY)}
 
 
 # ---------------------------------------------------------------------------
@@ -221,54 +218,61 @@ YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 PIXABAY_API_KEY = os.environ.get('PIXABAY_API_KEY', '')
 
 
-def _search_youtube_broll(query, tmp, width=1280, height=720, max_clips=3):
-    """Busca videos CC en YouTube y descarga los primeros max_clips resultados.
-    Retorna lista de paths a clips normalizados. Requiere YOUTUBE_API_KEY env var."""
-    if not YOUTUBE_API_KEY or not query:
+def _search_pixabay_broll(query, tmp, width=1280, height=720, max_clips=4):
+    """Busca videos en Pixabay y descarga los mejores resultados.
+    Retorna lista de paths a clips normalizados."""
+    if not PIXABAY_API_KEY or not query:
         return []
 
     try:
         resp = requests.get(
-            'https://www.googleapis.com/youtube/v3/search',
+            'https://pixabay.com/api/videos/',
             params={
-                'part': 'snippet',
+                'key': PIXABAY_API_KEY,
                 'q': query,
-                'type': 'video',
-                'videoLicense': 'creativeCommon',
-                'maxResults': max_clips + 2,  # pedir de más por si alguno falla
-                'videoDuration': 'medium',    # 4-20 min — clips usables
-                'order': 'relevance',
-                'key': YOUTUBE_API_KEY,
+                'per_page': max_clips + 4,
+                'safesearch': 'true',
+                'order': 'relevant',
             },
             timeout=15
         )
         resp.raise_for_status()
-        items = resp.json().get('items', [])
+        hits = resp.json().get('hits', [])
     except Exception as e:
-        print(f'[yt-search] API error: {e}')
+        print(f'[pixabay-search] API error: {e}')
         return []
 
     clips = []
-    for i, item in enumerate(items):
+    for i, hit in enumerate(hits):
         if len(clips) >= max_clips:
             break
-        vid_id = item.get('id', {}).get('videoId')
-        if not vid_id:
-            continue
-        yt_url = f'https://www.youtube.com/watch?v={vid_id}'
-        raw  = f"{tmp}/yt_broll_raw_{i}.mp4"
-        norm = f"{tmp}/yt_broll_norm_{i}.mp4"
-        try:
-            if not _ytdlp_download(yt_url, raw):
+        videos = hit.get('videos', {})
+        # Seleccionar mejor resolución disponible cerca del target
+        target_w = width
+        best_url = None
+        best_diff = float('inf')
+        for quality in ['large', 'medium', 'small', 'tiny']:
+            v = videos.get(quality, {})
+            if not v.get('url'):
                 continue
+            w = v.get('width', 0)
+            diff = abs(w - target_w)
+            if diff < best_diff:
+                best_diff = diff
+                best_url = v['url']
+        if not best_url:
+            continue
+        raw  = f"{tmp}/px_broll_raw_{i}.mp4"
+        norm = f"{tmp}/px_broll_norm_{i}.mp4"
+        try:
+            _download(best_url, raw)
             _normalize_clip(raw, norm, width=width, height=height, max_dur=30)
             dur = _get_video_duration(norm)
             if dur > 1.0:
                 clips.append(norm)
-                title = item.get('snippet', {}).get('title', '')[:50]
-                print(f'[yt-broll] clip {i} OK: {title} ({dur:.0f}s)')
+                print(f'[pixabay] clip {i} OK: {hit.get("tags","")[:40]} ({dur:.0f}s)')
         except Exception as e:
-            print(f'[yt-broll] clip {i} FAILED: {e}')
+            print(f'[pixabay] clip {i} FAILED: {e}')
 
     return clips
 
@@ -1052,8 +1056,8 @@ def process_short_v4():
                     print(f'[short] yt-dlp artículo falló: {e}')
 
         # 1. YouTube CC B-Roll por keywords
-        if not video_input and broll_query and YOUTUBE_API_KEY:
-            yt_clips = _search_youtube_broll(broll_query, tmp, width=720, height=1280, max_clips=2)
+        if not video_input and broll_query and PIXABAY_API_KEY:
+            yt_clips = _search_pixabay_broll(broll_query, tmp, width=720, height=1280, max_clips=2)
             if yt_clips:
                 broll_path = _build_broll(tmp, [], audio_dur, width=720, height=1280, max_clips=0) or None
                 concat_txt = f"{tmp}/yt_short_concat.txt"
@@ -1175,8 +1179,8 @@ def process_digest():
         pexels_clips = []
         if remaining > 5.0:
             # 2a. Primero intentar YouTube CC (más relevante que Pexels)
-            if broll_query and YOUTUBE_API_KEY:
-                yt_clips = _search_youtube_broll(broll_query, tmp, width=1280, height=720, max_clips=4)
+            if broll_query and PIXABAY_API_KEY:
+                yt_clips = _search_pixabay_broll(broll_query, tmp, width=1280, height=720, max_clips=4)
                 if yt_clips:
                     yt_broll = _build_broll(tmp, [], remaining, width=1280, height=720, max_clips=0)
                     # Concatenar clips de YouTube directamente
