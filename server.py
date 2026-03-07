@@ -42,6 +42,8 @@ def health():
         'node_version': node_version,
         'youtube_api_key_set': bool(YOUTUBE_API_KEY),
         'youtube_api_key_prefix': YOUTUBE_API_KEY[:8] + '...' if YOUTUBE_API_KEY else None,
+        'pixabay_api_key_set': bool(PIXABAY_API_KEY),
+        'pixabay_api_key_prefix': PIXABAY_API_KEY[:8] + '...' if PIXABAY_API_KEY else None,
     }
 
 
@@ -216,6 +218,7 @@ def _ytdlp_download(url, output_path, max_dur=60):
 
 
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
+PIXABAY_API_KEY = os.environ.get('PIXABAY_API_KEY', '')
 
 
 def _search_youtube_broll(query, tmp, width=1280, height=720, max_clips=3):
