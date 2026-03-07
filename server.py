@@ -35,6 +35,34 @@ def health():
     }
 
 
+@app.route('/test-ytdlp')
+def test_ytdlp():
+    """Test si yt-dlp puede descargar un video de YouTube."""
+    import tempfile, time, traceback
+    test_url = request.args.get('url', 'https://www.youtube.com/watch?v=U7kJaDVN00s')
+    with tempfile.TemporaryDirectory() as tmp:
+        out = f"{tmp}/test.mp4"
+        t0 = time.time()
+        try:
+            result = subprocess.run([
+                'yt-dlp', '--no-playlist',
+                '--format', 'best[ext=mp4][height<=480]/best[height<=480]',
+                '--output', out,
+                '--socket-timeout', '20',
+                '--quiet',
+                test_url
+            ], capture_output=True, text=True, timeout=60)
+            elapsed = round(time.time() - t0, 1)
+            if result.returncode == 0 and os.path.exists(out):
+                size = os.path.getsize(out)
+                return {'ok': True, 'url': test_url, 'size_bytes': size, 'elapsed_s': elapsed}
+            return {'ok': False, 'returncode': result.returncode,
+                    'stderr': result.stderr[:500], 'elapsed_s': elapsed}
+        except Exception as e:
+            return {'ok': False, 'error': traceback.format_exc()[-300:],
+                    'elapsed_s': round(time.time() - t0, 1)}
+
+
 @app.route('/test-broll')
 def test_broll():
     """Endpoint de diagnóstico: prueba búsqueda YouTube CC y devuelve resultado."""
